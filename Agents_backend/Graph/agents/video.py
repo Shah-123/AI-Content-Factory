@@ -48,8 +48,16 @@ from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, Field
 
 from langchain_core.messages import SystemMessage, HumanMessage
-from google import genai
-from google.genai import types
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    try:
+        import google.genai as genai
+        from google.genai import types
+    except ImportError:
+        genai = None
+        types = None
 
 from Graph.state import State
 from .utils import logger, llm, _job, _emit
@@ -82,7 +90,7 @@ HOOK_SUB_SIZE   = 48
 CROSSFADE_DURATION = 0.3  # seconds
 
 # TTS retry
-_TTS_MAX_ATTEMPTS = 3
+_TTS_MAX_ATTEMPTS = 5
 _TTS_BACKOFF_BASE = 2
 
 
@@ -274,9 +282,11 @@ def generate_tts_voiceover(text: str, voice: str = "Puck") -> Optional[str]:
             return None
 
         except Exception as e:
+            err_str = str(e)
             if attempt < _TTS_MAX_ATTEMPTS:
-                wait = _TTS_BACKOFF_BASE * attempt
-                logger.warning(f"   ⚠️ TTS attempt {attempt} failed: {e}. Retrying in {wait}s...")
+                # Add jitter and exponential backoff
+                wait = (_TTS_BACKOFF_BASE ** attempt) + (random.random() * 2)
+                logger.warning(f"   ⚠️ TTS attempt {attempt} failed: {e}. Retrying in {wait:.1f}s...")
                 time.sleep(wait)
             else:
                 logger.error(f"   ❌ TTS failed after {_TTS_MAX_ATTEMPTS} attempts: {e}")
@@ -612,9 +622,8 @@ def crossfade_clips(clips: list, duration: float = CROSSFADE_DURATION) -> list:
     region is embedded as a composite clip inserted between each pair.
     """
     try:
-        from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip
-        from moviepy.video.fx.fadeout import FadeOut
-        from moviepy.video.fx.fadein import FadeIn
+        from moviepy.video.compositing import CompositeVideoClip
+        from moviepy.video.fx import FadeOut, FadeIn
     except ImportError:
         logger.warning("moviepy fx unavailable — skipping crossfades.")
         return clips
@@ -696,8 +705,7 @@ def composite_shorts_video(
         try:
             # MoviePy v2.x
             from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
-            import moviepy.video.fx as _vfx
-            Loop = _vfx.Loop
+            from moviepy.video.fx import Loop
         except (ImportError, AttributeError):
             # MoviePy v1.x fallback
             from moviepy.video.io.VideoFileClip import VideoFileClip

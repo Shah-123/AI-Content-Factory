@@ -1,5 +1,7 @@
 import os
 import re
+import time
+import random
 from typing import Optional
 from pathlib import Path
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -27,46 +29,67 @@ def decide_images(state: State) -> dict:
     }
 
 def _generate_image_bytes_google(prompt: str) -> Optional[bytes]:
-    """Generates image using Google GenAI (Gemini)."""
+    """Generates image using Google GenAI (Gemini) with retries for rate limits."""
     try:
         from google import genai
         from google.genai import types
-        
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key: 
-            return None
-
-        client = genai.Client(api_key=api_key)
-        resp = client.models.generate_content(
-            model="gemini-2.5-flash-image", 
-            contents=prompt,
-            config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
-        )
-        
-        if resp.candidates and resp.candidates[0].content.parts:
-            for part in resp.candidates[0].content.parts:
-                if part.inline_data:
-                    return part.inline_data.data
-        return None
     except ImportError:
-        logger.warning("Google GenAI library not installed.")
+        try:
+            import google.genai as genai
+            from google.genai import types
+        except ImportError:
+            logger.warning("Google GenAI library not found or fails to import.")
+            return None
+    
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key: 
+        logger.warning("GOOGLE_API_KEY not found for image generation.")
         return None
+
+    try:
+        client = genai.Client(api_key=api_key)
+        
+        for attempt in range(5): # Up to 5 attempts
+            try:
+                resp = client.models.generate_content(
+                    model="gemini-2.0-flash", # Using flash for better availability, or gemini-2.0-flash-exp
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
+                )
+                
+                if resp.candidates and resp.candidates[0].content.parts:
+                    for part in resp.candidates[0].content.parts:
+                        if part.inline_data:
+                            return part.inline_data.data
+                return None
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    wait_time = (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(f"⚠️ Gemini rate limited (429). Retrying in {wait_time:.1f}s... (Attempt {attempt+1}/5)")
+                    time.sleep(wait_time)
+                    continue
+                raise e # Re-raise other exceptions to be caught by outer try
+            
+    except Exception as e:
+        logger.error(f"❌ Image generation failed: {e}")
+        return None
+
     except Exception as e:
         logger.warning(f"Image Gen Error: {e}")
         return None
 
 def generate_and_place_images(state: State) -> dict:
-    """Generates images, replaces placeholders, and returns final text."""
+    """Generates images and saves them to the assets folder without modifying the blog text."""
     _emit(_job(state), "images", "working", "Generating AI images...")
     logger.info("🎨 GENERATING IMAGES & SAVING ---")
     
-    plan = state["plan"]
-    final_md = state.get("merged_md", "")
     image_specs = state.get("image_specs", [])
-    
     base_path = state.get("blog_folder", ".")
     assets_path = f"{base_path}/assets/images"
     
+    generated_images = []
+
     if os.getenv("GOOGLE_API_KEY") and image_specs:
         logger.info(f"Attempting to generate {len(image_specs)} images...")
         
@@ -81,53 +104,8 @@ def generate_and_place_images(state: State) -> dict:
                 
                 full_path = Path(f"{assets_path}/{img_filename}")
                 full_path.write_bytes(img_bytes)
+                generated_images.append(str(full_path))
                 
-                rel_path = f"../assets/images/{img_filename}"
-                markdown_image = f"\n\n![{img['alt']}]({rel_path})\n*Figure: {img['caption']}*\n\n"
-                
-                target_phrase = img.get("target_paragraph", "").strip()
-                if target_phrase:
-                    paragraphs = re.split(r'\n\s*\n', final_md)
-                    target_words = set(target_phrase.lower().split())
-                    
-                    best_match_idx = -1
-                    best_score = 0
-
-                    for i, p in enumerate(paragraphs):
-                        p_words = set(p.lower().split())
-                        overlap = len(target_words.intersection(p_words))
-                        if overlap > best_score:
-                            best_score = overlap
-                            best_match_idx = i
-
-                    if best_match_idx >= 0 and best_score >= min(3, len(target_words) // 3):
-                        # Check if the paragraph immediately after the best match is a mermaid block.
-                        # If so, REPLACE it with the AI image to avoid duplication.
-                        next_idx = best_match_idx + 1
-                        if (next_idx < len(paragraphs) and
-                                paragraphs[next_idx].strip().startswith("```mermaid")):
-                            paragraphs[next_idx] = markdown_image.strip()
-                        else:
-                            paragraphs.insert(next_idx, markdown_image.strip())
-
-                        # Strip orphaned "consider the following diagram/flowchart" sentences
-                        # from the matched paragraph to keep the prose clean.
-                        cleaned = re.sub(
-                            r'[^.!?]*\bconsider the following (diagram|flowchart|chart|figure)\b[^.!?]*[.!?]?\s*',
-                            '',
-                            paragraphs[best_match_idx],
-                            flags=re.IGNORECASE,
-                        ).strip()
-                        if cleaned:
-                            paragraphs[best_match_idx] = cleaned
-
-                        final_md = "\n\n".join(paragraphs)
-                    else:
-                        logger.warning(f"Could not find target paragraph similar to '{target_phrase}', appending to end.")
-                        final_md += "\n" + markdown_image
-                else:
-                    final_md += "\n" + markdown_image
-
                 logger.info(f"✅ Generated: {img_filename}")
             else:
                 logger.error(f"Failed: {img['filename']} (skipping)")
@@ -136,4 +114,6 @@ def generate_and_place_images(state: State) -> dict:
         logger.info("⏭️ Skipped Image Generation (No API Key or no specs)")
 
     _emit(_job(state), "images", "completed", "Images processed")
-    return {"final": final_md}
+    
+    # We do NOT return "final" anymore because we aren't modifying the markdown inline.
+    return {}

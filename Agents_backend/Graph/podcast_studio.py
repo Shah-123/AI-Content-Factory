@@ -1,19 +1,27 @@
 import os
 import time
 from datetime import datetime
+import random
 from pathlib import Path
-from google import genai
-from google.genai import types
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    try:
+        import google.genai as genai
+        from google.genai import types
+    except ImportError:
+        # Fallback for older SDK or specific environment masks
+        genai = None
+        types = None
 
 from Graph.agents.utils import logger, _job, _emit
 
 # ✅ FIX: Retry configuration for Gemini TTS (matches video.py).
 # Gemini's TTS endpoint occasionally returns transient 500 errors.
 # 3 attempts with exponential backoff is enough to survive most transient failures.
-_TTS_MAX_ATTEMPTS = 3
-_TTS_BACKOFF_BASE = 2  # seconds — attempt 1: 2s wait, attempt 2: 4s wait
-
-# ✅ FIX: Named podcast voice so output is consistent across runs.
+_TTS_MAX_ATTEMPTS = 5
+_TTS_BACKOFF_BASE = 2
 _PODCAST_VOICE = "Aoede"  # calm, warm voice — good for educational podcasts
 
 # ============================================================================
@@ -119,10 +127,10 @@ Tone: {plan.tone if plan else "conversational"}
 
         except Exception as e:
             if attempt < _TTS_MAX_ATTEMPTS:
-                wait = _TTS_BACKOFF_BASE * attempt  # 2s, 4s
+                wait = (_TTS_BACKOFF_BASE ** attempt) + (random.random() * 2)
                 logger.warning(
                     f"   ⚠️ Podcast TTS attempt {attempt} failed: {e}. "
-                    f"Retrying in {wait}s..."
+                    f"Retrying in {wait:.1f}s..."
                 )
                 time.sleep(wait)
             else:

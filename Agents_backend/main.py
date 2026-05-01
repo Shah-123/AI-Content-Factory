@@ -6,11 +6,9 @@ from datetime import date, datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Environment Setup
+# Environment Setup — load .env but do NOT sys.exit here; api.py loads
+# the key at runtime. The CLI path validates inside run_app() instead.
 load_dotenv()
-if not os.getenv("OPENAI_API_KEY"):
-    print("❌ ERROR: OPENAI_API_KEY not found in .env file.")
-    sys.exit(1)
 
 # LangGraph Imports
 from langgraph.graph import StateGraph, START, END
@@ -334,60 +332,7 @@ def save_blog_content(folders: dict, state: State) -> dict:
 # 2. BUILD GRAPH
 # ===========================================================================
 
-def _after_qa(state: State) -> str:
-    """
-    ✅ Automated Revision Loop: routes to revision_node when QA detects critical
-    issues AND the revision limit hasn't been reached. Otherwise proceeds to
-    keyword_optimizer.
-
-    Flow:
-        qa_agent → _after_qa
-            ├─ critical issues AND revision_count < MAX_REVISIONS → revision_node → qa_agent (loop)
-            └─ READY or max revisions reached → keyword_optimizer
-    """
-    verdict = state.get("qa_verdict", "READY")
-    issues  = state.get("qa_issues", [])
-    revision_count = state.get("revision_count", 0)
-
-    if verdict == "NEEDS_REVISION":
-        critical = [i for i in issues if i.get("severity") == "critical"]
-
-        if critical and revision_count < MAX_REVISIONS:
-            logger.info(
-                f"🔄 Routing to revision loop "
-                f"({revision_count + 1}/{MAX_REVISIONS}) — "
-                f"{len(critical)} critical issue(s) to fix."
-            )
-            return "revision"
-
-        if critical:
-            # Max revisions reached but still has critical issues
-            logger.warning("=" * 60)
-            logger.warning(
-                f"⚠️  QA VERDICT: NEEDS_REVISION — "
-                f"{len(critical)} CRITICAL issue(s) remain after "
-                f"{revision_count} revision(s)."
-            )
-            logger.warning(
-                "   Output is marked as DRAFT. Review before publishing."
-            )
-            for i, issue in enumerate(critical, 1):
-                logger.warning(
-                    f"   [{i}] {issue.get('issue_type', 'unknown').upper()}: "
-                    f"{issue.get('claim', '')[:120]}"
-                )
-                logger.warning(
-                    f"       Fix: {issue.get('recommendation', '')[:120]}"
-                )
-            logger.warning("=" * 60)
-        else:
-            logger.warning(
-                f"⚠️  QA verdict: NEEDS_REVISION ({len(issues)} minor issue(s)). "
-                f"Review recommended but not blocking."
-            )
-
-    return "keyword_optimizer"
-
+# (Removed _after_qa)
 
 def _qa_needs_review(state: State) -> bool:
     """Returns True if QA detected critical issues that require human review."""
@@ -446,15 +391,33 @@ def build_graph(memory=None):
     workflow.add_conditional_edges("orchestrator", fanout, ["worker"])
     workflow.add_edge("worker",               "reducer")
     workflow.add_edge("reducer",              "completion_validator")
-    workflow.add_edge("completion_validator", "qa_agent")
+    
+    # Conditional edge from completion_validator
+    workflow.add_conditional_edges(
+        "completion_validator",
+        lambda s: "qa_agent" if s.get("generate_qa", False) else "keyword_optimizer"
+    )
 
     # ✅ Automated Revision Loop:
     # qa_agent → _after_qa routes to either:
     #   - "revision" (critical issues + under max) → loops back to qa_agent
     #   - "keyword_optimizer" (READY or max revisions reached)
+    MAX_MANUAL_REVISIONS = 1
+    
+    def _after_qa_manual(state: State) -> str:
+        verdict = state.get("qa_verdict", "READY")
+        issues = state.get("qa_issues", [])
+        revision_count = state.get("revision_count", 0)
+
+        if verdict == "NEEDS_REVISION":
+            critical = [i for i in issues if i.get("severity") == "critical"]
+            if critical and revision_count < MAX_MANUAL_REVISIONS:
+                return "revision"
+        return "keyword_optimizer"
+
     workflow.add_conditional_edges(
         "qa_agent",
-        _after_qa,
+        _after_qa_manual,
         ["revision", "keyword_optimizer"]
     )
     workflow.add_edge("revision", "qa_agent")  # ← the feedback loop

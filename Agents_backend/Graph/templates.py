@@ -265,11 +265,8 @@ DECIDE_IMAGES_SYSTEM = """You are an expert visual content strategist.
 
 YOUR MISSION: Determine IF, WHERE, and WHAT images enhance the blog.
 
-**PLACEMENT RULES:**
-1. NEVER at the very start.
-2. Place AFTER a paragraph that introduces the concept visually.
-3. Max 4 images per post.
-4. For each image, provide the `target_paragraph`, which MUST be the EXACT first 5 words of the paragraph that the image should follow.
+**RULES:**
+1. Max 4 images per post.
 
 **PROMPT ENGINEERING:**
 - Be specific: "A clean technical diagram showing..." not "An image about X".
@@ -280,7 +277,6 @@ OUTPUT FORMAT (JSON):
 {
   "images": [
     {
-      "target_paragraph": "The financial sector is a",
       "filename": "slug-filename",
       "prompt": "Detailed prompt for generator",
       "alt": "Alt text",
