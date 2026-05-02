@@ -181,7 +181,7 @@ function TopNav({ view }: { view: ViewState }) {
         {view === 'content' && (
           <div className="hidden md:flex relative group mr-2">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-base-500 group-focus-within:text-accent-400 transition-colors" />
-            <input className="bg-base-800 border border-white/[0.06] rounded-xl pl-9 pr-4 py-1.5 text-sm text-base-100 focus:outline-none focus:border-accent-500/40 transition-all w-56 placeholder:text-base-500" placeholder="Search content..." type="text" />
+            <input className="bg-base-800 border border-white/0.06 rounded-xl pl-9 pr-4 py-1.5 text-sm text-base-100 focus:outline-none focus:border-accent-500/40 transition-all w-56 placeholder:text-base-500" placeholder="Search content..." type="text" />
           </div>
         )}
         <button className="p-2 rounded-xl text-base-400 hover:text-accent-400 hover:bg-white/[0.03] transition-all"><Bell className="w-[18px] h-[18px]" /></button>
