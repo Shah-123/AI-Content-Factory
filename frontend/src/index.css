@@ -1,7 +1,7 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
 
 /* ===================================================================
-   SYNTHETIC ETHER — Design System
    Aesthetic: Dark editorial + warm amber accent. 
    Inspired by late-night creative studios, not generic SaaS dashboards.
    =================================================================== */

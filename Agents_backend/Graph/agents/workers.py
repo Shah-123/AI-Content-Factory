@@ -160,6 +160,10 @@ def worker_node(payload: dict) -> dict:
 
         section_md = response.content.strip()
 
+        # Check for unclosed code blocks and close them
+        if section_md.count("```") % 2 != 0:
+            section_md += "\n```\n"
+
         lines = section_md.split('\n')
         if lines and re.match(r'^#{1,4}\s+', lines[0]):
             lines      = lines[1:]
@@ -173,7 +177,7 @@ def worker_node(payload: dict) -> dict:
                 f"({word_count} words, target: {task.target_words})"
             )
 
-        if not section_md.endswith(('.', '!', '?', '"', ')')):
+        if not section_md.endswith(('.', '!', '?', '"', ')', '`', '```', '```\n')):
             logger.warning(f"Section {task.id + 1} incomplete (doesn't end with punctuation)")
             section_md += "."
 
