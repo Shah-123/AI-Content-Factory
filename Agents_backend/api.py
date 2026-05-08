@@ -45,6 +45,8 @@ logger = logging.getLogger("api")
 _approval_events: dict[str, asyncio.Event] = {}
 # Maps job_id → revised plan dict (or None for approve-as-is)
 _plan_revisions: dict[str, Any] = {}
+# Maps job_id → directly edited Plan object from the outline editor
+_direct_plan_updates: dict[str, Any] = {}
 # Maps job_id → threading.Event for the worker thread to await
 _worker_approval_events: dict[str, threading.Event] = {}
 
@@ -102,10 +104,19 @@ class CreateJobRequest(BaseModel):
     generate_podcast: bool = False
     generate_video: bool = False
     generate_campaign: bool = False
+    generate_qa: bool = True
 
 
 class RevisePlanRequest(BaseModel):
     feedback: str
+
+
+class UpdatePlanRequest(BaseModel):
+    """Accepts a directly-edited plan from the frontend outline editor."""
+    blog_title: str
+    tone: str = "professional"
+    audience: str = "general"
+    tasks: list[dict]  # Each dict has: title, goal, bullets, target_words, tags
 
 
 # ============================================================================
@@ -114,7 +125,8 @@ class RevisePlanRequest(BaseModel):
 
 def _run_pipeline(job_id: str, topic: str, tone: str, sections: int,
                   generate_podcast: bool, generate_video: bool,
-                  generate_campaign: bool, worker_event: threading.Event):
+                  generate_campaign: bool, generate_qa: bool,
+                  worker_event: threading.Event):
     """
     Runs the full LangGraph pipeline in a background thread.
     Emits events to the event_bus so the WebSocket can relay them.
@@ -156,7 +168,7 @@ def _run_pipeline(job_id: str, topic: str, tone: str, sections: int,
             "target_keywords":   [],
             "target_sections":   sections,
             "generate_images":   False,
-            "generate_qa":       False,
+            "generate_qa":       generate_qa,
             "generate_campaign": generate_campaign,
             "generate_video":    generate_video,
             "generate_podcast":  generate_podcast,
@@ -185,10 +197,28 @@ def _run_pipeline(job_id: str, topic: str, tone: str, sections: int,
                 logger.error(f"❌ Job {job_id}: Plan approval timed out after 20 minutes.")
                 raise TimeoutError("HITL plan approval timed out")
 
-            # Apply any revision
+            # Apply direct plan edit or LLM-based revision
+            from Graph.agents.orchestrator import _assign_evidence_to_tasks
+            evidence = state.get("evidence", [])
+
+            direct_plan = _direct_plan_updates.pop(job_id, None)
             revised = _plan_revisions.pop(job_id, None)
-            if revised is not None:
+
+            if direct_plan is not None:
+                # User directly edited the outline — use their plan as-is
+                new_plan = direct_plan
+                if evidence:
+                    new_plan = _assign_evidence_to_tasks(new_plan, evidence)
+                graph.update_state(thread_cfg, {"plan": new_plan})
+                # Update the stored plan in DB so frontend stays in sync
+                set_job_awaiting_approval(job_id, json.dumps(new_plan.model_dump()))
+                events.emit(job_id, "orchestrator", "plan_revised",
+                            "Plan updated with your direct edits.")
+            elif revised is not None:
                 new_plan = refine_plan_with_llm(plan, revised)
+                # ✅ FIX: Re-assign evidence to the revised plan's tasks
+                if evidence:
+                    new_plan = _assign_evidence_to_tasks(new_plan, evidence)
                 graph.update_state(thread_cfg, {"plan": new_plan})
                 events.emit(job_id, "orchestrator", "plan_revised",
                             "Plan updated based on your feedback.")
@@ -266,14 +296,15 @@ async def create_new_job(req: CreateJobRequest, background_tasks: BackgroundTask
 
     background_tasks.add_task(
         _run_pipeline,
-        job_id           = job_id,
-        topic            = req.topic,
-        tone             = req.tone,
-        sections         = req.sections,
-        generate_podcast = req.generate_podcast,
-        generate_video   = req.generate_video,
-        generate_campaign= req.generate_campaign,
-        worker_event     = worker_event,
+        job_id            = job_id,
+        topic             = req.topic,
+        tone              = req.tone,
+        sections          = req.sections,
+        generate_podcast  = req.generate_podcast,
+        generate_video    = req.generate_video,
+        generate_campaign = req.generate_campaign,
+        generate_qa       = req.generate_qa,
+        worker_event      = worker_event,
     )
     return job
 
@@ -335,6 +366,45 @@ async def revise_plan(job_id: str, req: RevisePlanRequest):
     return {"status": "revision_queued"}
 
 
+@app.post("/api/jobs/{job_id}/update-plan")
+async def update_plan_direct(job_id: str, req: UpdatePlanRequest):
+    """Accept a directly-edited plan from the outline editor and unblock the worker."""
+    from Graph.state import Plan, Task
+
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    # Rebuild Task list with sequential IDs and safe defaults
+    tasks = []
+    for i, t in enumerate(req.tasks):
+        tasks.append(Task(
+            id=i,
+            title=t.get("title", f"Section {i + 1}"),
+            goal=t.get("goal", ""),
+            bullets=t.get("bullets", []),
+            target_words=t.get("target_words", 350),
+            tags=t.get("tags", []),
+            assigned_evidence_indices=[],  # will be re-assigned by the worker thread
+        ))
+
+    new_plan = Plan(
+        blog_title=req.blog_title,
+        tone=req.tone,
+        audience=req.audience,
+        tasks=tasks,
+        primary_keywords=job.get("plan", {}).get("primary_keywords", []) if job.get("plan") else [],
+        keyword_strategy=job.get("plan", {}).get("keyword_strategy", "") if job.get("plan") else "",
+    )
+
+    _direct_plan_updates[job_id] = new_plan
+    worker_event = _worker_approval_events.get(job_id)
+    if worker_event:
+        worker_event.set()
+    update_job(job_id, status="running")
+    return {"status": "plan_updated", "sections": len(tasks)}
+
+
 @app.get("/api/jobs/{job_id}/qa-report")
 async def get_qa_report(job_id: str):
     """Return the QA report text for a completed job."""
@@ -365,13 +435,53 @@ async def serve_file(job_id: str, filepath: str):
 # MANUAL TASKS (Decoupled generation)
 # ============================================================================
 
+# Per-job lock to protect metadata.json writes from concurrent tasks
+_job_file_locks: dict[str, threading.Lock] = {}
+
+
+def _get_job_lock(job_id: str) -> threading.Lock:
+    """Get or create a threading lock for a specific job's file operations."""
+    if job_id not in _job_file_locks:
+        _job_file_locks[job_id] = threading.Lock()
+    return _job_file_locks[job_id]
+
+
+def _update_metadata_json(meta_path: Path, updates: dict, job_lock: threading.Lock):
+    """Thread-safe read-modify-write of metadata.json.
+
+    Only merges the provided keys into the existing metadata, so
+    concurrent tasks (video, podcast, campaign) never clobber each
+    other's entries.
+    """
+    with job_lock:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        # Merge top-level keys
+        for k, v in updates.items():
+            if k == "file_paths" and isinstance(v, dict):
+                # Deep-merge file_paths so each task only adds its own entry
+                meta.setdefault("file_paths", {}).update(v)
+            else:
+                meta[k] = v
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+
+
 def _run_manual_task(job_id: str, task_name: str):
-    """Runs a specific decoupled media or QA task on a completed blog."""
+    """Runs a specific decoupled media or QA task on a completed blog.
+
+    Media tasks (video, podcast, campaign) save ONLY their own artifact
+    and do a surgical DB + metadata update — they never call the heavy
+    save_blog_content() function. This makes them safe to run in parallel.
+
+    Content-modifying tasks (images, qa) still use save_blog_content()
+    because they rewrite the blog markdown, but they acquire a per-job
+    file lock to prevent concurrent metadata corruption.
+    """
     try:
         from dotenv import load_dotenv
         load_dotenv(_HERE.parent / ".env")
-        
-        from main import save_blog_content
+
         from Graph.nodes import (
             decide_images, generate_and_place_images,
             video_generator_node, podcast_node,
@@ -432,46 +542,110 @@ def _run_manual_task(job_id: str, task_name: str):
 
         events.emit(job_id, task_name, "started", f"Starting manual {task_name}...")
 
-        updates = {}
-        if task_name == "images":
-            state.update(decide_images(state))
-            state.update(generate_and_place_images(state))
-        elif task_name == "video":
-            video_path = Path(base_path) / "video" / "short.mp4"
-            if job.get("video_file") or video_path.exists():
+        job_lock = _get_job_lock(job_id)
+
+        # ── Ensure output directories exist ─────────────────────────────
+        for sub in ("content", "social_media", "reports", "assets/images",
+                     "research", "audio", "video", "metadata"):
+            os.makedirs(Path(base_path) / sub, exist_ok=True)
+
+        # ==================================================================
+        # MEDIA TASKS — lightweight, concurrency-safe, no save_blog_content
+        # ==================================================================
+
+        if task_name == "video":
+            video_out = Path(base_path) / "video" / "short.mp4"
+            if job.get("video_file") or video_out.exists():
                 events.emit(job_id, task_name, "completed", "Video already exists. Skipping.")
-                # Self-heal DB if it exists on disk but not in DB
                 if not job.get("video_file"):
-                    update_job(job_id, video_file=f"video/short.mp4")
+                    update_job(job_id, video_file="video/short.mp4")
                 return
             state.update(video_generator_node(state))
-        elif task_name == "podcast":
-            podcast_path = Path(base_path) / "audio" / "podcast.mp3"
-            if job.get("podcast_file") or podcast_path.exists():
+            # Save the video file to the correct location
+            import shutil
+            if state.get("video_path") and os.path.exists(state["video_path"]):
+                dest = str(video_out)
+                try:
+                    if not os.path.samefile(state["video_path"], dest):
+                        shutil.copy(state["video_path"], dest)
+                except (OSError, ValueError):
+                    shutil.copy(state["video_path"], dest)
+            # Surgical DB update — only touch the video column
+            rel = "video/short.mp4"
+            update_job(job_id, video_file=rel)
+            _update_metadata_json(meta_path, {"file_paths": {"video": str(video_out)}}, job_lock)
+            events.emit(job_id, "system", "completed", "Video completed successfully.")
+            return
+
+        if task_name == "podcast":
+            podcast_out = Path(base_path) / "audio" / "podcast.wav"
+            podcast_mp3 = Path(base_path) / "audio" / "podcast.mp3"
+            if job.get("podcast_file") or podcast_out.exists() or podcast_mp3.exists():
                 events.emit(job_id, task_name, "completed", "Podcast already exists. Skipping.")
                 if not job.get("podcast_file"):
-                    update_job(job_id, podcast_file=f"audio/podcast.mp3")
+                    ext = "podcast.mp3" if podcast_mp3.exists() else "podcast.wav"
+                    update_job(job_id, podcast_file=f"audio/{ext}")
                 return
             state.update(podcast_node(state))
-        elif task_name == "campaign":
+            # Save the podcast file to the correct location
+            import shutil
+            if state.get("podcast_audio_path") and os.path.exists(state["podcast_audio_path"]):
+                dest = str(podcast_out)
+                try:
+                    if not os.path.samefile(state["podcast_audio_path"], dest):
+                        shutil.copy(state["podcast_audio_path"], dest)
+                except (OSError, ValueError):
+                    shutil.copy(state["podcast_audio_path"], dest)
+            # Surgical DB update — only touch the podcast column
+            rel = "audio/podcast.wav"
+            update_job(job_id, podcast_file=rel)
+            _update_metadata_json(meta_path, {"file_paths": {"podcast": str(podcast_out)}}, job_lock)
+            events.emit(job_id, "system", "completed", "Podcast completed successfully.")
+            return
+
+        if task_name == "campaign":
             if job.get("social_linkedin") or job.get("social_twitter"):
                 events.emit(job_id, task_name, "completed", "Social media already exists. Skipping.")
                 return
             state.update(campaign_generator_node(state))
-            updates["social_linkedin"] = state.get("linkedin_post", "")
-            updates["social_twitter"] = state.get("twitter_thread", "")
+            # Save social media text files
+            slug = plan_obj.blog_title.replace(" ", "_").lower()[:50] if plan_obj else "blog"
+            social_dir = Path(base_path) / "social_media"
+            if state.get("linkedin_post"):
+                (social_dir / f"linkedin_{slug}.txt").write_text(state["linkedin_post"], encoding="utf-8")
+            if state.get("twitter_thread"):
+                (social_dir / f"twitter_{slug}.md").write_text(state["twitter_thread"], encoding="utf-8")
+            # Surgical DB update — only touch social columns
+            update_job(
+                job_id,
+                social_linkedin=state.get("linkedin_post", ""),
+                social_twitter=state.get("twitter_thread", ""),
+            )
+            events.emit(job_id, "system", "completed", "Campaign completed successfully.")
+            return
+
+        # ==================================================================
+        # CONTENT-MODIFYING TASKS — use save_blog_content with file lock
+        # ==================================================================
+
+        from main import save_blog_content
+
+        updates = {}
+
+        if task_name == "images":
+            state.update(decide_images(state))
+            state.update(generate_and_place_images(state))
+
         elif task_name == "qa":
             state.update(qa_agent_node(state))
             if state.get("qa_verdict") == "NEEDS_REVISION":
                 state.update(revision_node(state))
-                # Optional: score again after revision
                 state.update(qa_agent_node(state))
-            
             updates["qa_score"] = state.get("qa_score")
             updates["qa_verdict"] = state.get("qa_verdict")
             updates["final_content"] = state.get("final")
 
-        # Create folders dict required for save_blog_content
+        # Build folders dict for save_blog_content
         folders = {
             "base": base_path,
             "content": f"{base_path}/content",
@@ -484,41 +658,25 @@ def _run_manual_task(job_id: str, task_name: str):
             "metadata": f"{base_path}/metadata"
         }
 
-        # Ensure all folders exist
-        for folder_path in folders.values():
-            os.makedirs(folder_path, exist_ok=True)
-        
-        # Save output artifacts
         saved = {}
-        try:
-            saved = save_blog_content(folders, state)
-        except Exception as save_err:
-            logger.warning(f"save_blog_content failed ({save_err}), falling back to direct DB update")
-        
-        # Update relative paths for media files in the database
-        if saved.get("video"):
-            updates["video_file"] = os.path.relpath(saved["video"], base_path)
-        elif state.get("video_path") and os.path.exists(state["video_path"]):
-            # Fallback: if save_blog_content failed but the video file exists
-            video_rel = os.path.relpath(state["video_path"], base_path)
-            updates["video_file"] = video_rel
+        with job_lock:
+            try:
+                saved = save_blog_content(folders, state)
+            except Exception as save_err:
+                logger.warning(f"save_blog_content failed ({save_err}), falling back to direct DB update")
 
-        if saved.get("podcast"):
-            updates["podcast_file"] = os.path.relpath(saved["podcast"], base_path)
-        elif state.get("podcast_audio_path") and os.path.exists(state["podcast_audio_path"]):
-            podcast_rel = os.path.relpath(state["podcast_audio_path"], base_path)
-            updates["podcast_file"] = podcast_rel
-            
-        if "final" in state:
+        if saved.get("blog"):
+            updates["blog_file"] = os.path.relpath(saved["blog"], base_path)
+        if saved.get("blog_html"):
+            updates["blog_html_file"] = os.path.relpath(saved["blog_html"], base_path)
+        if task_name == "images" and "final" in state:
             updates["final_content"] = state["final"]
-            updates["blog_file"] = os.path.relpath(saved["blog"], base_path) if saved.get("blog") else None
-            updates["blog_html_file"] = os.path.relpath(saved["blog_html"], base_path) if saved.get("blog_html") else None
-        
+
         if updates:
             update_job(job_id, **updates)
 
         events.emit(job_id, "system", "completed", f"{task_name.capitalize()} completed successfully.")
-        
+
     except Exception as exc:
         logger.exception(f"Manual {task_name} failed: {exc}")
         events.emit(job_id, "system", "error", f"{task_name} failed: {exc}")
@@ -557,22 +715,34 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
     """Stream agent events to the browser in real-time."""
     await websocket.accept()
     queue = events.subscribe(job_id)
+
+    # Count how many events were pre-loaded (replayed from disk history).
+    # We must NOT close the WebSocket when replaying a historical
+    # "system:completed" event — only close on a LIVE one.
+    replay_remaining = queue.qsize()
+
     try:
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                is_replay = replay_remaining > 0
+                if is_replay:
+                    replay_remaining -= 1
+
                 try:
                     await websocket.send_json(event)
                 except Exception:
                     # Connection closed or error sending
                     break
-                # Only close on FINAL completion (system agent) or any error
-                if event.get("status") == "error" or (
-                    event.get("agent_name") == "system"
-                    and event.get("status") == "completed"
-                ):
-                    await asyncio.sleep(0.5)
-                    break
+
+                # Only close on LIVE (non-replayed) terminal events
+                if not is_replay:
+                    if event.get("status") == "error" or (
+                        event.get("agent_name") == "system"
+                        and event.get("status") == "completed"
+                    ):
+                        await asyncio.sleep(0.5)
+                        break
             except asyncio.TimeoutError:
                 # Send a keepalive ping
                 try:
@@ -589,3 +759,4 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
                 await websocket.close()
         except Exception:
             pass
+
