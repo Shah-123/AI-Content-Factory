@@ -37,7 +37,7 @@ RULES:
 4. DO NOT add new sections, headings, or paragraphs.
 5. DO NOT change the tone, style, or structure.
 6. DO NOT invent replacement statistics or facts — ONLY use what is in the evidence.
-7. Preserve all Markdown formatting exactly (##, **, [], images, mermaid diagrams).
+7. Preserve all Markdown formatting exactly (##, **, [], images).
 8. Return the COMPLETE blog post with your targeted fixes applied.
 
 Think of yourself as a fact-checker with the original research in hand. For every flagged 

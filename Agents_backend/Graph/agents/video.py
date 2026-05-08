@@ -30,7 +30,7 @@ Dependencies (add to requirements.txt):
     moviepy             — already present
     imageio-ffmpeg      — already present
 """
-
+import random 
 import os
 import re
 import sys

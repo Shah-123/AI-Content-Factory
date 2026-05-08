@@ -154,7 +154,6 @@ For EACH Task (section):
 - **Bullets**: 3-5 specific sub-points. Force the inclusion of concrete examples, case studies, specific algorithms, or real-world use cases. DO NOT write vague conceptual bullets.
 - **Target Words**: 250-450 words per section.
 - **Tags**: Include relevant keywords for this section.
-- **Diagram Request**: If a section explains a complex flow, architecture, or timeline, explicitly add "MERMAID_DIAGRAM_REQUIRED: [Description inside]" to the bullets so the writer knows to generate a Mermaid graph. NEVER request generic "Figures", ONLY request "Mermaid JS Diagrams".
 
 **5. TITLE SEO RULES**
 - Must be ≤60 characters total.
@@ -235,7 +234,6 @@ YOUR MISSION: Write ONE COMPLETE section of a blog post with exceptional quality
 - Attempt to reach or closely approach the {target_words} target WITHOUT adding fluff or hallucinations.
 - **Provide Practical Examples:** For every major concept, include a brief, concrete real-world example.
 - **Rich Formatting**: Include at least one Markdown table if comparing items, use `> blockquotes` for important insights, and bold the most important technical keywords.
-- **Mermaid Diagrams:** If the section bullets request a `MERMAID_DIAGRAM_REQUIRED: [description]`, you MUST write valid ````mermaid` syntax. DO NOT just write "Figure X".
 
 **TONE & STYLE CONSTRAINTS:**
 - **Keywords**: Naturally integrate these keywords: {keywords}. No keyword stuffing.
@@ -252,8 +250,7 @@ YOUR MISSION: Write ONE COMPLETE section of a blog post with exceptional quality
 2. Did I avoid inventing statistics, tool names, or case studies?
 3. Did I avoid repeating facts that appear in other sections?
 4. Did I maintain {tone} tone — including the closing sentence?
-5. Did I output a real ````mermaid` diagram if one was requested?
-6. Does my section end with proper punctuation that matches the tone?
+5. Does my section end with proper punctuation that matches the tone?
 
 OUTPUT: Return ONLY the section content in pure Markdown. Do not wrap in JSON.
 """

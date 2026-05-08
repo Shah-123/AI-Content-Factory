@@ -60,6 +60,22 @@ def _get_assigned_evidence(task: Task, all_evidence: list) -> list:
     return [all_evidence[i] for i in indices if i < len(all_evidence)]
 
 
+def _get_assigned_evidence_dicts(task: Task, all_evidence_dicts: list) -> list:
+    """
+    Slices the pre-serialized evidence list using the task's assigned indices.
+    Works on dicts (already serialized) so no model_dump() runs per worker.
+
+    Mirrors _get_assigned_evidence() but accepts and returns plain dicts,
+    avoiding repeated Pydantic serialization inside the fanout loop.
+    """
+    indices = task.assigned_evidence_indices if hasattr(task, "assigned_evidence_indices") else []
+
+    if not indices or not all_evidence_dicts:
+        return all_evidence_dicts  # safe fallback: full list
+
+    return [all_evidence_dicts[i] for i in indices if i < len(all_evidence_dicts)]
+
+
 def fanout(state: State):
     """Generates parallel workers for each section."""
     if not state.get("plan"):
@@ -70,6 +86,11 @@ def fanout(state: State):
 
     all_evidence = state.get("evidence", [])
 
+    # Serialize ALL evidence items ONCE here, before the loop.
+    # Previously every Send() called model_dump() on its assigned slice,
+    # so shared items were serialized multiple times. Now it happens once.
+    all_evidence_dicts = [e.model_dump() for e in all_evidence]
+
     return [
         Send("worker", {
             "task":     task.model_dump(),
@@ -78,13 +99,8 @@ def fanout(state: State):
             "plan":     state["plan"].model_dump(),
             "_job_id":  state.get("_job_id", ""),
 
-            # ✅ FIX: Send only the evidence slice assigned to this task,
-            # not the full evidence list. This prevents every worker from
-            # citing the same top-2 stats and repeating them across all sections.
-            # _get_assigned_evidence() handles the index lookup and fallback.
-            "evidence": [
-                e.model_dump() for e in _get_assigned_evidence(task, all_evidence)
-            ],
+            # Slice the pre-serialized list instead of re-serializing per task
+            "evidence": _get_assigned_evidence_dicts(task, all_evidence_dicts),
 
             # Cost-saving toggle flags
             "generate_images":   state.get("generate_images", True),
