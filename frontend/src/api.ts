@@ -81,6 +81,20 @@ export class APIClient {
     if (!res.ok) throw new Error('Failed to revise plan');
   }
 
+  static async updatePlan(id: string, plan: {
+    blog_title: string;
+    tone: string;
+    audience: string;
+    tasks: Array<{ title: string; goal: string; bullets: string[]; target_words: number; tags: string[] }>;
+  }): Promise<void> {
+    const res = await fetch(`${API_BASE_URL}/api/jobs/${id}/update-plan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(plan),
+    });
+    if (!res.ok) throw new Error('Failed to update plan');
+  }
+
   static async triggerImages(id: string): Promise<void> {
     const res = await fetch(`${API_BASE_URL}/api/jobs/${id}/generate-images`, { method: 'POST' });
     if (!res.ok) throw new Error('Failed to trigger images');

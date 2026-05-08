@@ -11,7 +11,7 @@ import { APIClient, Job, AgentEvent } from './api';
 type ViewState = 'chat' | 'content';
 type TabState = 'blog' | 'video' | 'podcast' | 'images' | 'social';
 
-export function ContentView({ navTo, currentJob, refreshJob, events = [] }: { navTo: (v: ViewState) => void, currentJob: Job | null, refreshJob: () => void, events?: AgentEvent[] }) {
+export function ContentView({ navTo, currentJob, refreshJob, events = [], reconnectWS }: { navTo: (v: ViewState) => void, currentJob: Job | null, refreshJob: () => void, events?: AgentEvent[], reconnectWS?: (jobId: string) => void }) {
   const [activeTab, setActiveTab] = useState<TabState>('blog');
   const [triggering, setTriggering] = useState<Record<string, boolean>>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -48,6 +48,11 @@ export function ContentView({ navTo, currentJob, refreshJob, events = [] }: { na
     if (!currentJob) return;
     setTriggering(p => ({ ...p, [task]: true }));
     try {
+      // Re-connect the WebSocket so secondary-task events stream back live.
+      // The main pipeline WS closes itself on system:completed, so we must re-dial.
+      if (reconnectWS) {
+        reconnectWS(currentJob.id);
+      }
       if (task === 'qa') await APIClient.triggerQA(currentJob.id);
       if (task === 'podcast') await APIClient.triggerPodcast(currentJob.id);
       if (task === 'video') await APIClient.triggerVideo(currentJob.id);
