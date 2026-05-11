@@ -15,6 +15,7 @@ export function ContentView({ navTo, currentJob, refreshJob, events = [], reconn
   const [activeTab, setActiveTab] = useState<TabState>('blog');
   const [triggering, setTriggering] = useState<Record<string, boolean>>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Auto-clear triggering flags when generated data appears in the job
   useEffect(() => {
@@ -26,9 +27,21 @@ export function ContentView({ navTo, currentJob, refreshJob, events = [], reconn
       if (prev.video && currentJob.video_file) { next.video = false; changed = true; }
       if (prev.podcast && currentJob.podcast_file) { next.podcast = false; changed = true; }
       if (prev.qa && currentJob.qa_score != null) { next.qa = false; changed = true; }
+      if (prev.images && currentJob.final_content) { next.images = false; changed = true; }
       return changed ? next : prev;
     });
   }, [currentJob]);
+
+  // Clear triggering['images'] when backend events signal completion
+  // (images task doesn't update final_content, so the general useEffect above won't catch it)
+  useEffect(() => {
+    const hasImagesCompleted = events.some(
+      e => e.agent_name === 'images' && e.status === 'completed'
+    );
+    if (hasImagesCompleted && triggering['images']) {
+      setTriggering(prev => ({ ...prev, images: false }));
+    }
+  }, [events]);
 
   // Stop polling when no tasks are active
   useEffect(() => {
@@ -36,12 +49,16 @@ export function ContentView({ navTo, currentJob, refreshJob, events = [], reconn
     if (!anyActive && pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
+      if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
     }
   }, [triggering]);
 
   // Cleanup on unmount
   useEffect(() => {
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
   }, []);
 
   const handleTrigger = async (task: string) => {
@@ -62,7 +79,8 @@ export function ContentView({ navTo, currentJob, refreshJob, events = [], reconn
       if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = setInterval(() => { refreshJob(); }, 3000);
       // Safety: stop polling after 5 minutes
-      const safetyTimeout = setTimeout(() => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      timeoutRef.current = setTimeout(() => {
         if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
         setTriggering(p => ({ ...p, [task]: false }));
       }, 300000);
@@ -221,7 +239,7 @@ export function ContentView({ navTo, currentJob, refreshJob, events = [], reconn
                          <svg className="w-5 h-5 fill-current text-[#0a66c2]" viewBox="0 0 24 24"><path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z"></path></svg>
                          LinkedIn Post
                        </div>
-                       <button onClick={() => navigator.clipboard.writeText(currentJob.social_linkedin!)} className="text-base-400 hover:text-accent-400 transition-colors p-2 rounded-lg hover:bg-white/5" title="Copy to clipboard"><Copy className="w-4 h-4"/></button>
+                       <button onClick={() => navigator.clipboard.writeText(currentJob.social_linkedin!).catch(() => {})} className="text-base-400 hover:text-accent-400 transition-colors p-2 rounded-lg hover:bg-white/5" title="Copy to clipboard"><Copy className="w-4 h-4"/></button>
                     </div>
                     <div className="bg-base-900 rounded-xl p-5 border border-white/5 flex-1">
                       <p className="text-sm text-base-300 leading-relaxed whitespace-pre-wrap">{currentJob.social_linkedin}</p>
@@ -234,7 +252,7 @@ export function ContentView({ navTo, currentJob, refreshJob, events = [], reconn
                          <svg className="w-5 h-5 fill-current text-base-200" viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.008 4.09H5.078z"></path></svg>
                          X / Twitter Thread
                        </div>
-                       <button onClick={() => navigator.clipboard.writeText(currentJob.social_twitter!)} className="text-base-400 hover:text-accent-400 transition-colors p-2 rounded-lg hover:bg-white/5" title="Copy to clipboard"><Copy className="w-4 h-4"/></button>
+                       <button onClick={() => navigator.clipboard.writeText(currentJob.social_twitter!).catch(() => {})} className="text-base-400 hover:text-accent-400 transition-colors p-2 rounded-lg hover:bg-white/5" title="Copy to clipboard"><Copy className="w-4 h-4"/></button>
                     </div>
                     <div className="bg-base-900 rounded-xl p-5 border border-white/5 flex-1">
                       <p className="text-sm text-base-300 leading-relaxed whitespace-pre-wrap">{currentJob.social_twitter}</p>
@@ -257,16 +275,16 @@ export function ContentView({ navTo, currentJob, refreshJob, events = [], reconn
         {/* IMAGES TAB */}
         {activeTab === 'images' && (
            <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <div className="glass-panel p-12 rounded-2xl text-center max-w-2xl mx-auto flex flex-col items-center justify-center min-h-[400px]">
-                <div className="w-20 h-20 bg-accent-500/10 rounded-full flex items-center justify-center mb-6">
-                  <ImageIcon className="w-10 h-10 text-accent-400" />
-                </div>
-                <h3 className="text-2xl font-bold text-base-50 mb-3">Blog Images</h3>
-                <p className="text-base-400 mb-8 max-w-md">Images are generated automatically when a blog is created. If you requested images, they will appear embedded directly inside the Blog tab content.</p>
-                <button onClick={() => setActiveTab('blog')} className="btn-primary px-6 py-3 rounded-xl font-semibold shadow-[0_0_20px_rgba(245,158,11,0.2)] hover:shadow-[0_0_30px_rgba(245,158,11,0.3)] transition-all">
-                  Go back to Blog
-                </button>
-              </div>
+             {triggering['images'] || (events.some(e => e.agent_name === 'images' && e.status !== 'completed' && e.status !== 'error')) ? (
+                <LoadingState title="Generating Images..." description="Our AI is crafting custom visuals to enhance your blog post." agentEvents={events.filter(e => e.agent_name === 'images')} />
+             ) : (
+                <EmptyState
+                  icon={<ImageIcon className="w-12 h-12" />}
+                  title="Generate Blog Images"
+                  description="Create custom AI-generated visuals that will be embedded directly into your blog post to enhance engagement and readability."
+                  onGenerate={() => handleTrigger('images')}
+                />
+             )}
            </div>
         )}
 

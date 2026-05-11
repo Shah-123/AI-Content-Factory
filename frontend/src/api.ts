@@ -1,6 +1,8 @@
 const API_BASE_URL = 'http://localhost:8000';
 const WS_BASE_URL = 'ws://localhost:8000';
 
+export type SourceMode = 'closed_book' | 'hybrid' | 'auto_topic';
+
 export interface CreateJobParams {
   topic: string;
   tone?: string;
@@ -8,6 +10,23 @@ export interface CreateJobParams {
   generate_podcast?: boolean;
   generate_video?: boolean;
   generate_campaign?: boolean;
+  // Document upload (optional)
+  upload_id?: string;
+  source_mode?: SourceMode;
+}
+
+export interface UploadResult {
+  upload_id: string;
+  filename: string;
+  format: string;
+  bytes: number;
+  pages: number;
+  chunks: number;
+  chunks_processed: number;
+  evidence_count: number;
+  truncated: boolean;
+  derived_topic: string;
+  preview: string;
 }
 
 export interface Job {
@@ -51,13 +70,55 @@ export class APIClient {
     return res.json();
   }
 
+  static async fetchTrending(): Promise<string[]> {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/trending`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return Array.isArray(data.topics) ? data.topics : [];
+    } catch {
+      return [];
+    }
+  }
+
+  static async uploadDocument(file: File): Promise<UploadResult> {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(`${API_BASE_URL}/api/uploads`, {
+      method: 'POST',
+      body: form,
+    });
+    if (!res.ok) {
+      let detail: any = null;
+      try { detail = (await res.json())?.detail; } catch { /* ignore */ }
+      const err: any = new Error(detail?.reason || 'Upload failed.');
+      err.code = detail?.error || 'upload_failed';
+      err.detail = detail;
+      throw err;
+    }
+    return res.json();
+  }
+
   static async createJob(params: CreateJobParams): Promise<Job> {
     const res = await fetch(`${API_BASE_URL}/api/jobs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-    if (!res.ok) throw new Error('Failed to create job');
+    if (!res.ok) {
+      // Try to surface the backend's structured rejection (e.g. Topic Guard).
+      let detail: any = null;
+      try { detail = (await res.json())?.detail; } catch { /* ignore */ }
+      if (detail && typeof detail === 'object' && detail.error === 'topic_rejected') {
+        const err: any = new Error(detail.reason || 'Topic was rejected.');
+        err.code = 'topic_rejected';
+        err.category = detail.category;
+        err.reason = detail.reason;
+        err.suggested_topic = detail.suggested_topic;
+        throw err;
+      }
+      throw new Error('Failed to create job');
+    }
     return res.json();
   }
 
