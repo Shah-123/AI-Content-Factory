@@ -19,11 +19,14 @@ Thumbs.db
 blogs/
 generated_podcasts/
 generated_videos/
-.agent
+.agent/
+.qoder/
 
 # Databases
 *.db
 *.sqlite
 Agents_backend/data/
-blogs/
 *qoder
+
+# Golden test artifacts
+Agents_backend/tests/golden/_runs/

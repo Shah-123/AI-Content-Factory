@@ -25,8 +25,14 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+# ── Load .env BEFORE any agent module is imported, otherwise ChatOpenAI
+#    instantiated at import-time in Graph.agents.utils will fail with
+#    "OPENAI_API_KEY not set" on the first /api/trending call.
+from dotenv import load_dotenv
+load_dotenv(_HERE.parent / ".env")
+
 # ── FastAPI ─────────────────────────────────────────────────────────────────
-from fastapi import FastAPI, BackgroundTasks, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, BackgroundTasks, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -100,11 +106,15 @@ async def root():
 class CreateJobRequest(BaseModel):
     topic: str
     tone: str = "professional"
+    audience: str = "general"
     sections: int = 3
     generate_podcast: bool = False
     generate_video: bool = False
     generate_campaign: bool = False
     generate_qa: bool = True
+    # — Document upload (optional) —
+    upload_id: str | None = None
+    source_mode: str = "hybrid"   # "closed_book" | "hybrid" | "auto_topic"
 
 
 class RevisePlanRequest(BaseModel):
@@ -123,10 +133,12 @@ class UpdatePlanRequest(BaseModel):
 # BACKGROUND WORKER
 # ============================================================================
 
-def _run_pipeline(job_id: str, topic: str, tone: str, sections: int,
-                  generate_podcast: bool, generate_video: bool,
+def _run_pipeline(job_id: str, topic: str, tone: str, audience: str,
+                  sections: int, generate_podcast: bool, generate_video: bool,
                   generate_campaign: bool, generate_qa: bool,
-                  worker_event: threading.Event):
+                  worker_event: threading.Event,
+                  upload_id: str | None = None,
+                  source_mode: str = "hybrid"):
     """
     Runs the full LangGraph pipeline in a background thread.
     Emits events to the event_bus so the WebSocket can relay them.
@@ -165,6 +177,7 @@ def _run_pipeline(job_id: str, topic: str, tone: str, sections: int,
             "sections":          [],
             "blog_folder":       folders["base"],
             "target_tone":       tone,
+            "target_audience":   audience,
             "target_keywords":   [],
             "target_sections":   sections,
             "generate_images":   False,
@@ -174,6 +187,9 @@ def _run_pipeline(job_id: str, topic: str, tone: str, sections: int,
             "generate_podcast":  generate_podcast,
             "export_formats":    ["html"],
             "_job_id":           job_id,
+            # — Document upload —
+            "upload_id":         upload_id or "",
+            "source_mode":       source_mode,
         }
 
         # ── Phase 1: Research & Planning ──────────────────────────────────
@@ -271,15 +287,151 @@ def _run_pipeline(job_id: str, topic: str, tone: str, sections: int,
         logger.exception(f"Pipeline failed for job {job_id}: {exc}")
         set_job_failed(job_id, str(exc))
         events.emit(job_id, "system", "error", f"Generation failed: {exc}")
+    finally:
+        _worker_approval_events.pop(job_id, None)
 
 
 # ============================================================================
 # API ROUTES
 # ============================================================================
 
+# ── Document uploads ──────────────────────────────────────────────────────
+import uuid as _uuid_mod
+
+_UPLOADS_ROOT = _HERE / "uploads"
+_UPLOADS_ROOT.mkdir(parents=True, exist_ok=True)
+_SUPPORTED_UPLOAD_EXTS = {".pdf", ".docx", ".txt", ".md"}
+_MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB
+
+
+def _safe_upload_name(name: str) -> str:
+    """Strip path components and disallow risky characters in filenames."""
+    base = os.path.basename(name or "")
+    # Replace anything outside [A-Za-z0-9._-] with underscore
+    cleaned = "".join(c if c.isalnum() or c in "._- " else "_" for c in base).strip()
+    return cleaned or "upload"
+
+
+@app.post("/api/uploads")
+async def upload_document(file: UploadFile = File(...)):
+    """Accept a single document, parse it, extract evidence, and persist
+    everything under uploads/<upload_id>/. Returns metadata the frontend
+    needs to wire the upload to a subsequent /api/jobs request.
+    """
+    filename = _safe_upload_name(file.filename or "upload")
+    ext = Path(filename).suffix.lower()
+    if ext not in _SUPPORTED_UPLOAD_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "unsupported_format",
+                "reason": f"File type '{ext or '?'}' is not supported.",
+                "supported": sorted(_SUPPORTED_UPLOAD_EXTS),
+            },
+        )
+
+    # Stream the upload into the chosen folder while enforcing the size cap.
+    upload_id = _uuid_mod.uuid4().hex
+    upload_dir = _UPLOADS_ROOT / upload_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    target = upload_dir / filename
+
+    bytes_written = 0
+    try:
+        with target.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)  # 1 MB at a time
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > _MAX_UPLOAD_BYTES:
+                    out.close()
+                    target.unlink(missing_ok=True)
+                    upload_dir.rmdir()
+                    raise HTTPException(
+                        status_code=413,
+                        detail={
+                            "error": "file_too_large",
+                            "reason": f"Maximum upload size is {_MAX_UPLOAD_BYTES // (1024*1024)} MB.",
+                        },
+                    )
+                out.write(chunk)
+    finally:
+        await file.close()
+
+    # Heavy work: parse → chunk → LLM-extract evidence. Off the event loop.
+    try:
+        from Graph.agents.document_ingest import ingest_upload
+        meta = await asyncio.to_thread(ingest_upload, upload_dir, filename)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"Upload ingest failed for {upload_id}: {exc}")
+        # Clean up partial state so a retry doesn't accumulate junk.
+        try:
+            for child in upload_dir.iterdir():
+                child.unlink(missing_ok=True)
+            upload_dir.rmdir()
+        except OSError:
+            pass
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "ingest_failed", "reason": str(exc)},
+        )
+
+    return {
+        "upload_id": upload_id,
+        "filename": meta.get("filename", filename),
+        "format": meta.get("format"),
+        "bytes": bytes_written,
+        "pages": meta.get("pages", 0),
+        "chunks": meta.get("chunks", 0),
+        "chunks_processed": meta.get("chunks_processed", 0),
+        "evidence_count": meta.get("evidence_count", 0),
+        "truncated": meta.get("truncated", False),
+        "derived_topic": meta.get("derived_topic", ""),
+        "preview": meta.get("preview", ""),
+    }
+
+
+@app.get("/api/uploads/{upload_id}")
+async def get_upload(upload_id: str):
+    """Return previously computed metadata for an upload, or 404."""
+    # Defend against path traversal — only accept simple uuid-like strings.
+    if not upload_id or any(c in upload_id for c in "/\\.:"):
+        raise HTTPException(status_code=400, detail="Invalid upload_id.")
+    upload_dir = _UPLOADS_ROOT / upload_id
+    if not upload_dir.exists():
+        raise HTTPException(status_code=404, detail="Upload not found.")
+    from Graph.agents.document_ingest import load_upload_metadata
+    meta = load_upload_metadata(upload_dir)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Upload metadata missing.")
+    return {"upload_id": upload_id, **meta}
+
+
 @app.post("/api/jobs")
 async def create_new_job(req: CreateJobRequest, background_tasks: BackgroundTasks):
     """Start a blog generation job."""
+    # ── Pre-flight Topic Guard ────────────────────────────────────────────
+    # Reject unsafe / nonsensical topics BEFORE creating a job or burning
+    # any pipeline tokens. Run in a worker thread so the synchronous LLM
+    # call doesn't block the FastAPI event loop.
+    from Graph.agents.topic_guard import evaluate_topic
+    verdict = await asyncio.to_thread(evaluate_topic, req.topic)
+    if not verdict.is_safe:
+        logger.warning(
+            f"Topic rejected by guard: '{req.topic[:80]}' "
+            f"(category={verdict.category}) — {verdict.reason}"
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "topic_rejected",
+                "category": verdict.category,
+                "reason": verdict.reason,
+                "suggested_topic": verdict.suggested_topic,
+            },
+        )
+
     job = create_job(
         topic            = req.topic,
         tone             = req.tone,
@@ -299,12 +451,15 @@ async def create_new_job(req: CreateJobRequest, background_tasks: BackgroundTask
         job_id            = job_id,
         topic             = req.topic,
         tone              = req.tone,
+        audience          = req.audience,
         sections          = req.sections,
         generate_podcast  = req.generate_podcast,
         generate_video    = req.generate_video,
         generate_campaign = req.generate_campaign,
         generate_qa       = req.generate_qa,
         worker_event      = worker_event,
+        upload_id         = req.upload_id,
+        source_mode       = req.source_mode,
     )
     return job
 
@@ -313,6 +468,41 @@ async def create_new_job(req: CreateJobRequest, background_tasks: BackgroundTask
 async def list_all_jobs():
     """Return all jobs, newest-first."""
     return list_jobs()
+
+
+# ── Trending topics (cached for 1 hour) ──────────────────────────────────
+import time as _time
+_trending_cache: dict[str, Any] = {"topics": [], "expires_at": 0.0}
+_TRENDING_TTL_SECONDS = 3600  # refresh hourly
+_trending_lock = asyncio.Lock()
+
+@app.get("/api/trending")
+async def get_trending():
+    """Return 4 LLM-suggested trending blog topics for the dashboard empty state."""
+    now = _time.time()
+    if _trending_cache["topics"] and _trending_cache["expires_at"] > now:
+        return {"topics": _trending_cache["topics"], "cached": True}
+
+    async with _trending_lock:
+        # Double-check after acquiring lock
+        if _trending_cache["topics"] and _trending_cache["expires_at"] > _time.time():
+            return {"topics": _trending_cache["topics"], "cached": True}
+
+        try:
+            from Graph.agents.trending import get_trending_topics
+            topics = await asyncio.to_thread(get_trending_topics)
+            _trending_cache["topics"] = topics
+            _trending_cache["expires_at"] = _time.time() + _TRENDING_TTL_SECONDS
+            return {"topics": topics, "cached": False}
+        except Exception as e:
+            logger.exception(f"Trending topics endpoint failed: {e}")
+            # Always return something so the frontend never breaks
+            return {"topics": [
+                "AI agents in 2026",
+                "Building scalable RAG systems",
+                "Multi-modal LLMs explained",
+                "The future of voice AI",
+            ], "cached": False, "fallback": True}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -425,7 +615,10 @@ async def serve_file(job_id: str, filepath: str):
     job = get_job(job_id)
     if not job or not job.get("blog_folder"):
         raise HTTPException(404, "Job not found")
-    full_path = Path(job["blog_folder"]) / filepath
+    base = Path(job["blog_folder"]).resolve()
+    full_path = (base / filepath).resolve()
+    if not str(full_path).startswith(str(base)):
+        raise HTTPException(403, "Invalid path")
     if not full_path.exists():
         raise HTTPException(404, f"File not found: {filepath}")
     return FileResponse(str(full_path))

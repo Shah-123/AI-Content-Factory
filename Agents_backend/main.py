@@ -32,6 +32,7 @@ from Graph.nodes import (
     campaign_generator_node,
     video_generator_node,
     podcast_node,
+    document_ingest_node,
     _safe_slug
 )
 from Graph.agents.revision import MAX_REVISIONS
@@ -366,6 +367,7 @@ def build_graph(memory=None):
     workflow = StateGraph(State)
 
     workflow.add_node("router",               router_node)
+    workflow.add_node("document_ingest",      document_ingest_node)
     workflow.add_node("research",             research_node)
     workflow.add_node("orchestrator",         orchestrator_node)
     workflow.add_node("worker",               worker_node)
@@ -382,9 +384,34 @@ def build_graph(memory=None):
     # --- Edges ---
     workflow.add_edge(START, "router")
 
+    # ✅ Document Upload Routing:
+    # If the job carries an upload_id, run document_ingest first to load
+    # pre-extracted evidence (and optionally derive the topic).  Then:
+    #   - source_mode == "closed_book" → straight to orchestrator (no web)
+    #   - otherwise ("hybrid"|"auto_topic") → research_node, which now
+    #     MERGES web evidence on top of doc evidence instead of replacing.
+    def _after_router(s: State) -> str:
+        if s.get("upload_id"):
+            return "document_ingest"
+        return "research" if s.get("needs_research") else "orchestrator"
+
     workflow.add_conditional_edges(
         "router",
-        lambda s: "research" if s["needs_research"] else "orchestrator"
+        _after_router,
+        ["document_ingest", "research", "orchestrator"],
+    )
+
+    def _after_ingest(s: State) -> str:
+        mode = (s.get("source_mode") or "hybrid").lower()
+        if mode == "closed_book":
+            return "orchestrator"
+        # hybrid / auto_topic both want web research too
+        return "research"
+
+    workflow.add_conditional_edges(
+        "document_ingest",
+        _after_ingest,
+        ["orchestrator", "research"],
     )
 
     workflow.add_edge("research",             "orchestrator")
@@ -402,8 +429,10 @@ def build_graph(memory=None):
     # qa_agent → _after_qa routes to either:
     #   - "revision" (critical issues + under max) → loops back to qa_agent
     #   - "keyword_optimizer" (READY or max revisions reached)
-    MAX_MANUAL_REVISIONS = 1
-    
+    # Uses the single source of truth MAX_REVISIONS from revision.py
+    # (imported at the top of this module) — previously this file
+    # redefined its own MAX_MANUAL_REVISIONS=1 which drifted from the
+    # documented behaviour.
     def _after_qa_manual(state: State) -> str:
         verdict = state.get("qa_verdict", "READY")
         issues = state.get("qa_issues", [])
@@ -411,7 +440,7 @@ def build_graph(memory=None):
 
         if verdict == "NEEDS_REVISION":
             critical = [i for i in issues if i.get("severity") == "critical"]
-            if critical and revision_count < MAX_MANUAL_REVISIONS:
+            if critical and revision_count < MAX_REVISIONS:
                 return "revision"
         return "keyword_optimizer"
 
