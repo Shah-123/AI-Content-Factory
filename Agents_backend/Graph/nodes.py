@@ -11,7 +11,8 @@ from .agents import (
     qa_agent_node,
     revision_node,
     campaign_generator_node,
-    video_generator_node
+    video_generator_node,
+    document_ingest_node
 )
 from .agents.utils import _safe_slug
 from .podcast_studio import podcast_node
@@ -29,6 +30,7 @@ __all__ = [
     "revision_node",
     "campaign_generator_node",
     "video_generator_node",
+    "document_ingest_node",
     "podcast_node",
     "_safe_slug"
 ]

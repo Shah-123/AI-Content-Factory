@@ -164,7 +164,7 @@ def worker_node(payload: dict) -> dict:
                     f"Available Evidence (Cite these URLs — these are YOUR assigned sources):\n"
                     f"{evidence_text}\n\n"
                     f"CRITICAL INSTRUCTIONS:\n"
-                    f"1. Write EXACTLY {task.target_words} words (minimum)\n"
+                    f"1. Write approximately {task.target_words} words. Prioritize substance — do not add filler to hit the count.\n"
                     f"2. Cover ALL bullet points completely\n"
                     f"3. End with a complete sentence (period/question mark/exclamation)\n"
                     f"4. DO NOT stop mid-sentence or mid-paragraph\n\n"
