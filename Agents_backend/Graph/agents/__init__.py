@@ -8,6 +8,7 @@ from .quality_control import qa_agent_node
 from .revision import revision_node
 from .campaign import campaign_generator_node
 from .video import video_generator_node
+from .document_ingest import document_ingest_node
 
 __all__ = [
     "router_node",
@@ -22,4 +23,5 @@ __all__ = [
     "revision_node",
     "campaign_generator_node",
     "video_generator_node",
+    "document_ingest_node",
 ]

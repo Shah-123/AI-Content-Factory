@@ -96,6 +96,7 @@ def orchestrator_node(state: State) -> dict:
     evidence = state.get("evidence", [])
 
     target_tone     = state.get("target_tone", "professional")
+    target_audience = state.get("target_audience", "general")
     target_keywords = state.get("target_keywords", [])
     keywords_str    = ", ".join(target_keywords) if target_keywords else "None specified"
 
@@ -124,6 +125,7 @@ Create a blog plan that:
     plan = planner.invoke([
         SystemMessage(content=ORCH_SYSTEM.format(
             tone=target_tone,
+            audience=target_audience,
             keywords=keywords_str,
             target_sections=last_body_section,
             target_sections_plus_one=practical_section_number,

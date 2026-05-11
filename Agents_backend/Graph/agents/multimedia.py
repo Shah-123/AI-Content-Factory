@@ -52,7 +52,7 @@ def _generate_image_bytes_google(prompt: str) -> Optional[bytes]:
         for attempt in range(5): # Up to 5 attempts
             try:
                 resp = client.models.generate_content(
-                    model="gemini-2.0-flash", # Using flash for better availability, or gemini-2.0-flash-exp
+                    model="gemini-2.5-flash-image",
                     contents=prompt,
                     config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
                 )
@@ -75,10 +75,6 @@ def _generate_image_bytes_google(prompt: str) -> Optional[bytes]:
         logger.error(f"❌ Image generation failed: {e}")
         return None
 
-    except Exception as e:
-        logger.warning(f"Image Gen Error: {e}")
-        return None
-
 def generate_and_place_images(state: State) -> dict:
     """Generates images and saves them to the assets folder without modifying the blog text."""
     _emit(_job(state), "images", "working", "Generating AI images...")
@@ -88,8 +84,6 @@ def generate_and_place_images(state: State) -> dict:
     base_path = state.get("blog_folder", ".")
     assets_path = f"{base_path}/assets/images"
     
-    generated_images = []
-
     if os.getenv("GOOGLE_API_KEY") and image_specs:
         logger.info(f"Attempting to generate {len(image_specs)} images...")
         
@@ -104,8 +98,6 @@ def generate_and_place_images(state: State) -> dict:
                 
                 full_path = Path(f"{assets_path}/{img_filename}")
                 full_path.write_bytes(img_bytes)
-                generated_images.append(str(full_path))
-                
                 logger.info(f"✅ Generated: {img_filename}")
             else:
                 logger.error(f"Failed: {img['filename']} (skipping)")

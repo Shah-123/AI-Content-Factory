@@ -99,6 +99,13 @@ class State(TypedDict, total=False):
     target_keywords: List[str]        # e.g., ["AI healthcare", "medical automation"]
     target_sections: int              # How many body sections to generate
 
+    # --- Document Upload (optional) ---
+    # When set, a `document_ingest_node` runs before the orchestrator and
+    # loads pre-extracted EvidenceItems from the upload's evidence.json.
+    upload_id: Optional[str]
+    source_mode: Optional[str]        # "closed_book" | "hybrid" | "auto_topic"
+    document_filename: Optional[str]  # original filename for citations
+
     # --- Router Outputs ---
     needs_research: bool
     mode: str

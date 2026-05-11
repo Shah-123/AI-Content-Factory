@@ -2,29 +2,27 @@
 Tests for event_bus.py — real-time event pub/sub system.
 
 Tests the synchronous, non-asyncio parts of the event bus:
-emit, get_history, clear_job, _run_cleanup, and AgentEvent.
+emit, get_history, clear_job, and AgentEvent.
+
+Note: event_bus.py persists events to disk as JSONL files under
+data/events/<job_id>.jsonl. Each test gets a unique job_id and
+explicitly clears it on teardown to keep the suite hermetic.
 """
-import time
 import pytest
 from event_bus import (
     AgentEvent,
     emit,
     get_history,
     clear_job,
-    _run_cleanup,
-    _event_history,
     _subscribers,
-    _HISTORY_TTL_SECONDS,
 )
 
 
 @pytest.fixture(autouse=True)
 def clean_event_bus():
     """Ensure each test starts with a clean event bus."""
-    _event_history.clear()
     _subscribers.clear()
     yield
-    _event_history.clear()
     _subscribers.clear()
 
 
@@ -58,30 +56,53 @@ class TestAgentEvent:
 # emit + get_history
 # ========================================================================
 
+# Unique job_id per test method so concurrent test runs don't collide.
+import uuid
+
+
+def _job_id(prefix: str) -> str:
+    return f"test_{prefix}_{uuid.uuid4().hex[:8]}"
+
+
 class TestEmitAndHistory:
-    """Tests for emit() and get_history()."""
+    """Tests for emit() and get_history() (disk-backed JSONL)."""
 
     def test_emit_stores_event_in_history(self):
-        emit("job_test", "router", "started", "Starting analysis")
-        history = get_history("job_test")
-        assert len(history) == 1
-        assert history[0]["agent_name"] == "router"
-        assert history[0]["message"] == "Starting analysis"
+        jid = _job_id("emit_one")
+        try:
+            emit(jid, "router", "started", "Starting analysis")
+            history = get_history(jid)
+            assert len(history) == 1
+            assert history[0]["agent_name"] == "router"
+            assert history[0]["message"] == "Starting analysis"
+        finally:
+            clear_job(jid)
 
     def test_multiple_emits_accumulate(self):
-        emit("job_test", "router", "started", "Step 1")
-        emit("job_test", "researcher", "started", "Step 2")
-        emit("job_test", "qa", "completed", "Step 3")
-        history = get_history("job_test")
-        assert len(history) == 3
+        jid = _job_id("emit_many")
+        try:
+            emit(jid, "router", "started", "Step 1")
+            emit(jid, "researcher", "started", "Step 2")
+            emit(jid, "qa", "completed", "Step 3")
+            history = get_history(jid)
+            assert len(history) == 3
+        finally:
+            clear_job(jid)
 
     def test_separate_jobs_have_separate_history(self):
-        emit("job_a", "router", "started", "Job A event")
-        emit("job_b", "router", "started", "Job B event")
-        assert len(get_history("job_a")) == 1
-        assert len(get_history("job_b")) == 1
+        jid_a = _job_id("sep_a")
+        jid_b = _job_id("sep_b")
+        try:
+            emit(jid_a, "router", "started", "Job A event")
+            emit(jid_b, "router", "started", "Job B event")
+            assert len(get_history(jid_a)) == 1
+            assert len(get_history(jid_b)) == 1
+        finally:
+            clear_job(jid_a)
+            clear_job(jid_b)
 
     def test_empty_job_id_is_skipped(self):
+        # emit() returns early when job_id is falsy — no file is written.
         emit("", "router", "started", "Should be skipped")
         assert get_history("") == []
 
@@ -91,33 +112,14 @@ class TestEmitAndHistory:
 # ========================================================================
 
 class TestClearJob:
-    """Tests for clear_job()."""
+    """Tests for clear_job() — should remove the on-disk JSONL file."""
 
     def test_clears_history(self):
-        emit("job_clear", "agent", "started", "Something")
-        assert len(get_history("job_clear")) == 1
-        clear_job("job_clear")
-        assert get_history("job_clear") == []
+        jid = _job_id("clear_history")
+        emit(jid, "agent", "started", "Something")
+        assert len(get_history(jid)) == 1
+        clear_job(jid)
+        assert get_history(jid) == []
 
     def test_no_error_on_nonexistent_job(self):
-        clear_job("nonexistent_job")  # should not raise
-
-
-# ========================================================================
-# _run_cleanup
-# ========================================================================
-
-class TestRunCleanup:
-    """Tests for the synchronous _run_cleanup() function."""
-
-    def test_removes_stale_events(self):
-        # Inject a fake event with a very old timestamp
-        old_ts = time.time() - _HISTORY_TTL_SECONDS - 100
-        _event_history["old_job"].append((old_ts, {"agent_name": "test", "status": "done"}))
-        _run_cleanup()
-        assert "old_job" not in _event_history
-
-    def test_keeps_fresh_events(self):
-        emit("fresh_job", "agent", "started", "Recent event")
-        _run_cleanup()
-        assert len(get_history("fresh_job")) == 1
+        clear_job("nonexistent_" + uuid.uuid4().hex[:8])  # should not raise

@@ -200,10 +200,15 @@ def research_node(state: State) -> dict:
     if duplicates_skipped:
         logger.info(f"   🧹 Skipped {duplicates_skipped} near-duplicate result(s)")
 
+    # ✅ Document upload support: preserve any evidence already loaded by
+    # `document_ingest_node` running before us in the graph. We merge the
+    # web-research evidence on top instead of overwriting state["evidence"].
+    pre_existing = list(state.get("evidence") or [])
+
     if not raw_results:
         logger.warning("No results found.")
         _emit(_job(state), "research", "completed", "No results found", {"sources": 0})
-        return {"evidence": []}
+        return {"evidence": pre_existing}
 
     # ✅ FIX: Parallelize web scraping.
     # Previously 10 URLs scraped one-by-one with 15s timeout each = ~120s.
@@ -250,8 +255,24 @@ def research_node(state: State) -> dict:
         )),
     ])
 
-    evidence = list({e.url: e for e in pack.evidence if e.url}.values())
+    web_evidence = list({e.url: e for e in pack.evidence if e.url}.values())
 
-    logger.info(f"✅ Extracted {len(evidence)} verified deep-evidence items.")
-    _emit(_job(state), "research", "completed", f"Found {len(evidence)} verified evidence items", {"sources": len(evidence)})
-    return {"evidence": evidence}
+    # ✅ Merge with any document-derived evidence preserved at the start of
+    # this node so hybrid mode (upload + web) keeps both sources for citation.
+    merged: list = list(pre_existing)
+    seen_keys = {(getattr(e, "url", None), getattr(e, "snippet", None)[:80] if getattr(e, "snippet", None) else None) for e in pre_existing}
+    for ev in web_evidence:
+        key = (ev.url, (ev.snippet or "")[:80])
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        merged.append(ev)
+
+    logger.info(
+        f"✅ Extracted {len(web_evidence)} web evidence items "
+        f"(+ {len(pre_existing)} pre-existing from upload)."
+    )
+    _emit(_job(state), "research", "completed",
+          f"Found {len(web_evidence)} web sources (total evidence: {len(merged)})",
+          {"sources": len(web_evidence), "total": len(merged)})
+    return {"evidence": merged}
