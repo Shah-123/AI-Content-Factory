@@ -298,7 +298,7 @@ def generate_tts_voiceover(text: str, voice: str = "Puck") -> Optional[str]:
 # WHISPER — word timestamps for karaoke captions
 # ============================================================================
 
-def get_word_timestamps(audio_path: str) -> List[dict]:
+def get_word_timestamps(audio_path: str, model_size: str = "tiny") -> List[dict]:
     """
     Runs openai-whisper locally to get per-word timestamps.
     Returns a list of {"word": str, "start": float, "end": float}.
@@ -308,8 +308,8 @@ def get_word_timestamps(audio_path: str) -> List[dict]:
     """
     try:
         import whisper
-        logger.info("   🎙️ Transcribing audio for word timestamps (whisper)...")
-        model = whisper.load_model("tiny")   # fast; swap for "base" for accuracy
+        logger.info(f"   🎙️ Transcribing audio for word timestamps (whisper model: {model_size})...")
+        model = whisper.load_model(model_size)   # fast; swap for "base" for accuracy
         result = model.transcribe(audio_path, word_timestamps=True)
 
         words = []
@@ -710,7 +710,7 @@ def composite_shorts_video(
             # MoviePy v1.x fallback
             from moviepy.video.io.VideoFileClip import VideoFileClip
             from moviepy.audio.io.AudioFileClip import AudioFileClip
-            from moviepy.editor import concatenate_videoclips
+            from moviepy import concatenate_videoclips
             from moviepy.video.fx.loop import Loop
     except ImportError as e:
         logger.error(f"moviepy import failed: {e}")
@@ -941,7 +941,8 @@ def video_generator_node(state: State) -> dict:
     # 4. Word timestamps (whisper) → caption chunks
     # ------------------------------------------------------------------
     _emit(_job(state), "video", "working", "Transcribing audio for karaoke captions...")
-    word_timestamps = get_word_timestamps(audio_path)
+    model_size = state.get("whisper_model_size") or os.getenv("WHISPER_MODEL_SIZE", "tiny")
+    word_timestamps = get_word_timestamps(audio_path, model_size=model_size)
     caption_chunks  = build_caption_chunks(word_timestamps, audio_dur, script)
     logger.info(f"   💬 Built {len(caption_chunks)} caption chunks.")
 

@@ -153,6 +153,12 @@ class State(TypedDict, total=False):
     blog_evaluator_report: str   # Human-readable report with scores and feedback
     blog_evaluator_score: float  # 0-10 final score (average of 4 dimensions)
 
+    # --- G-Eval Scorecard ---
+    geval_scores: Optional[dict]  # In-house LLM-as-judge G-Eval (1–5 scale)
+
+    # --- DeepEval (official Liu et al. 2023 G-Eval, 0–1 scale) ---
+    deepeval_scores: Optional[dict]
+
     # --- Keyword Optimization ---
     keyword_analysis: dict      # Detailed keyword metrics
     keyword_report: str         # Human-readable report
@@ -168,6 +174,7 @@ class State(TypedDict, total=False):
     # --- Video & Audio Outputs ---
     video_path: Optional[str]          # Path to the finalized MP4 video
     podcast_audio_path: Optional[str]  # Path to the generated Gemini podcast audio
+    whisper_model_size: Optional[str]  # Optional Whisper model size configuration
 
     # --- Cost Saving Flags ---
     generate_images: bool

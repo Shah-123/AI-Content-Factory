@@ -2,7 +2,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from Graph.state import State, Plan, Task
 from Graph.templates import ORCH_SYSTEM
-from .utils import logger, llm, _job, _emit
+from .utils import logger, llm, llm_planner, _job, _emit
 
 # ✅ FIX #7: Named section constants (unchanged from before)
 FIXED_OPENING_SECTIONS = 2   # Section 1: Hook/Intro, Section 2: Context/Background
@@ -91,7 +91,7 @@ def _assign_evidence_to_tasks(plan: Plan, evidence: list) -> Plan:
 def orchestrator_node(state: State) -> dict:
     _emit(_job(state), "orchestrator", "started", "Creating detailed blog outline...")
     logger.info("📋 PLANNING ---")
-    planner = llm.with_structured_output(Plan)
+    planner = llm_planner.with_structured_output(Plan)
     mode    = state.get("mode", "closed_book")
     evidence = state.get("evidence", [])
 

@@ -20,10 +20,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
+import numpy as np
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -366,12 +368,121 @@ def derive_topic_from_document(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def split_into_sentences(text: str) -> List[str]:
+    """A simple but effective sentence splitter using regex."""
+    sentence_endings = re.compile(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|\!)\s')
+    sentences = sentence_endings.split(text)
+    return [s.strip() for s in sentences if s.strip()]
+
+
+def get_embeddings_model():
+    """Dynamically initializes the OpenAI Embeddings model to avoid startup errors if key is missing."""
+    from langchain_openai import OpenAIEmbeddings
+    return OpenAIEmbeddings(model="text-embedding-3-small")
+
+
+def semantic_chunking(
+    pages: List[str],
+    embeddings_model,
+    target_chunk_size: int = 1500,
+    min_chunk_size: int = 300,
+    max_chunk_size: int = 6000,
+    distance_threshold_percentile: float = 85.0
+) -> List[Chunk]:
+    """
+    Groups sentences into semantically coherent chunks using sentence embeddings.
+    """
+    # 1. Break the document down into sentences, tracking which page they came from
+    sentence_records = []
+    for page_idx, page in enumerate(pages):
+        if not page:
+            continue
+        sentences = split_into_sentences(page)
+        for s in sentences:
+            sentence_records.append({
+                "text": s,
+                "page": page_idx + 1
+            })
+            
+    if not sentence_records:
+        return []
+
+    # 2. Batch embed the sentences
+    texts = [record["text"] for record in sentence_records]
+    
+    # Batch embedding API (OpenAI embeddings model)
+    try:
+        embeddings = embeddings_model.embed_documents(texts)
+    except Exception as exc:
+        logger.warning(f"Embedding generation failed: {exc}. Falling back to character-based chunking.")
+        # Fallback to simple character-based chunking if embedding fails
+        return chunk_text(pages, max_chars=max_chunk_size)
+
+    # 3. Calculate distance between consecutive sentences
+    distances = []
+    for i in range(len(embeddings) - 1):
+        vec1 = np.array(embeddings[i])
+        vec2 = np.array(embeddings[i+1])
+        # Cosine distance
+        norm1 = np.linalg.norm(vec1)
+        norm2 = np.linalg.norm(vec2)
+        if norm1 > 0 and norm2 > 0:
+            cos_sim = np.dot(vec1, vec2) / (norm1 * norm2)
+        else:
+            cos_sim = 1.0
+        distances.append(1.0 - cos_sim)
+
+    # 4. Determine splitting threshold
+    if distances:
+        threshold = np.percentile(distances, distance_threshold_percentile)
+    else:
+        threshold = 1.0
+
+    # 5. Build chunks based on threshold, respecting target/min/max sizes
+    chunks: List[Chunk] = []
+    current_sentences = []
+    current_length = 0
+    start_page = sentence_records[0]["page"]
+    
+    for idx, record in enumerate(sentence_records):
+        current_sentences.append(record["text"])
+        current_length += len(record["text"]) + 1 # +1 for space/newline
+        
+        # Determine if we should split before the NEXT sentence
+        should_split = False
+        if idx < len(sentence_records) - 1:
+            # Split if semantic distance exceeds threshold
+            is_semantic_boundary = distances[idx] > threshold
+            # Avoid making chunks too small or too large
+            if is_semantic_boundary and current_length >= min_chunk_size:
+                should_split = True
+            if current_length >= target_chunk_size:
+                should_split = True
+        
+        # Hard cap ceiling limit
+        if current_length >= max_chunk_size:
+            should_split = True
+            
+        if should_split or idx == len(sentence_records) - 1:
+            chunk_text_str = " ".join(current_sentences).strip()
+            if chunk_text_str:
+                chunks.append(Chunk(
+                    text=chunk_text_str,
+                    page_start=start_page,
+                    page_end=record["page"]
+                ))
+            current_sentences = []
+            current_length = 0
+            if idx < len(sentence_records) - 1:
+                start_page = sentence_records[idx + 1]["page"]
+
+    return chunks
+
+
 def ingest_upload(upload_dir: Path, original_filename: str) -> dict:
     """End-to-end upload processing: parse → chunk → extract → persist.
-
-    Writes `evidence.json` and `meta.json` next to the source file so the
-    pipeline can load them later without re-running the LLM extraction.
-    Returns a metadata dict suitable for the HTTP response.
+    
+    Now supports Advanced RAG: semantic chunking and chunk embeddings.
     """
     src_files = [
         p for p in upload_dir.iterdir()
@@ -382,13 +493,44 @@ def ingest_upload(upload_dir: Path, original_filename: str) -> dict:
     src = src_files[0]
 
     parsed = parse_document(src)
-    chunks = chunk_text(parsed["pages"])
+    
+    # ── Semantic Chunking ───────────────────────────────────────────
+    try:
+        embeddings_model = get_embeddings_model()
+        chunks = semantic_chunking(parsed["pages"], embeddings_model)
+    except Exception as exc:
+        logger.warning(f"Semantic chunking failed: {exc}. Using character-based fallback.")
+        chunks = chunk_text(parsed["pages"])
+
+    # ── Chunk Embeddings ─────────────────────────────────────────────
+    chunk_embeddings = []
+    if chunks:
+        try:
+            chunk_texts = [c.text for c in chunks]
+            chunk_embeddings = embeddings_model.embed_documents(chunk_texts)
+        except Exception as exc:
+            logger.warning(f"Generating chunk embeddings failed: {exc}")
+
+    # Save embeddings & chunks
+    embeddings_path = upload_dir / "embeddings.json"
+    with embeddings_path.open("w", encoding="utf-8") as f:
+        serialized_chunks = []
+        for i, c in enumerate(chunks):
+            serialized_chunks.append({
+                "text": c.text,
+                "page_start": c.page_start,
+                "page_end": c.page_end,
+                "embedding": chunk_embeddings[i] if i < len(chunk_embeddings) else []
+            })
+        json.dump(serialized_chunks, f, indent=2)
+
+    # ── Evidence Extraction (Fallback / General) ────────────────────
     evidence, truncated = extract_evidence_from_chunks(
         chunks, original_filename, topic_hint=""
     )
     derived_topic = derive_topic_from_document(parsed["text"])
 
-    # Persist evidence so document_ingest_node can load it cheaply.
+    # Persist evidence so document_ingest_node can load it cheaply as fallback
     evidence_path = upload_dir / "evidence.json"
     with evidence_path.open("w", encoding="utf-8") as f:
         json.dump([e.model_dump() for e in evidence], f, indent=2)
@@ -454,21 +596,21 @@ def _resolve_uploads_root() -> Path:
 def document_ingest_node(state: State) -> dict:
     """LangGraph node: load doc evidence + (optionally) derive topic.
 
-    Runs only when `state["upload_id"]` is set. Reads pre-computed
-    `evidence.json` written by the upload endpoint. If `source_mode` is
-    "auto_topic" and the user did not supply a topic, the derived topic
-    is promoted into state.
+    Runs only when `state["upload_id"]` is set.
+    Performs dynamic Advanced RAG search over embedded chunks if topic or keywords are specified,
+    falling back to pre-extracted evidence if embeddings do not exist or retrieval fails.
     """
     job_id = _job(state)
     upload_id = state.get("upload_id") or ""
     source_mode = state.get("source_mode") or "hybrid"
+    topic = state.get("topic") or ""
+    keywords = state.get("target_keywords") or []
 
     if not upload_id:
-        # Defensive: shouldn't be routed here unless an upload exists.
         return {}
 
     _emit(job_id, "ingest", "started",
-          "Loading document evidence...",
+          "Performing Advanced RAG semantic search on document...",
           {"upload_id": upload_id, "source_mode": source_mode})
     logger.info(f"📄 INGEST --- upload_id={upload_id} mode={source_mode}")
 
@@ -478,11 +620,88 @@ def document_ingest_node(state: State) -> dict:
         return {}
 
     meta = load_upload_metadata(upload_dir) or {}
-    evidence = load_upload_evidence(upload_dir)
+    filename = meta.get("filename", "document")
+    
+    # ── Advanced RAG Retrieval ──────────────────────────────────────
+    evidence = []
+    retrieved_chunks = []
+    
+    embeddings_path = upload_dir / "embeddings.json"
+    if embeddings_path.exists() and (topic or keywords):
+        try:
+            with embeddings_path.open("r", encoding="utf-8") as f:
+                serialized_chunks = json.load(f)
+            
+            # Reconstruct Chunk objects
+            all_chunks = []
+            chunk_embs = []
+            for item in serialized_chunks:
+                all_chunks.append(Chunk(
+                    text=item["text"],
+                    page_start=item["page_start"],
+                    page_end=item["page_end"]
+                ))
+                chunk_embs.append(item.get("embedding", []))
+                
+            # Perform query embedding
+            query_text = f"{topic} " + " ".join(keywords)
+            query_text = query_text.strip()
+            
+            if query_text and chunk_embs and any(chunk_embs):
+                embeddings_model = get_embeddings_model()
+                query_emb = embeddings_model.embed_query(query_text)
+                
+                # Compute cosine similarities
+                similarities = []
+                for emb in chunk_embs:
+                    if not emb:
+                        similarities.append(0.0)
+                        continue
+                    v_q = np.array(query_emb)
+                    v_c = np.array(emb)
+                    norm_q = np.linalg.norm(v_q)
+                    norm_c = np.linalg.norm(v_c)
+                    if norm_q > 0 and norm_c > 0:
+                        sim = np.dot(v_q, v_c) / (norm_q * norm_c)
+                    else:
+                        sim = 0.0
+                    similarities.append(sim)
+                    
+                # Rank chunks and filter by similarity threshold (0.35)
+                ranked_indices = np.argsort(similarities)[::-1]
+                top_indices = [idx for idx in ranked_indices if similarities[idx] >= 0.35]
+                
+                # If nothing passed the threshold, fall back to top 2 chunks (if similarity > 0.0)
+                if not top_indices:
+                    top_indices = [idx for idx in ranked_indices if similarities[idx] > 0.0][:2]
+                else:
+                    top_indices = top_indices[:8]
+                    
+                retrieved_chunks = [all_chunks[idx] for idx in top_indices]
+                
+                logger.info(f"RAG: Retrieved top {len(retrieved_chunks)} semantic chunks for query '{query_text}'")
+                _emit(job_id, "ingest", "working", 
+                      f"Retrieved top {len(retrieved_chunks)} relevant sections from document...")
+        except Exception as exc:
+            logger.exception(f"Advanced RAG retrieval failed, falling back to pre-extracted evidence: {exc}")
+            
+    # If we retrieved chunks, perform dynamic evidence extraction
+    if retrieved_chunks:
+        try:
+            evidence, _ = extract_evidence_from_chunks(
+                retrieved_chunks, filename, topic_hint=topic, max_chunks=8
+            )
+        except Exception as exc:
+            logger.exception(f"Dynamic evidence extraction failed: {exc}")
+
+    # Fallback to pre-extracted evidence.json if dynamic RAG yielded nothing
+    if not evidence:
+        logger.info("Using pre-extracted evidence fallback")
+        evidence = load_upload_evidence(upload_dir)
 
     out: dict = {
         "evidence": evidence,
-        "document_filename": meta.get("filename"),
+        "document_filename": filename,
     }
 
     # Topic auto-derivation
@@ -494,11 +713,11 @@ def document_ingest_node(state: State) -> dict:
 
     _emit(
         job_id, "ingest", "completed",
-        f"Loaded {len(evidence)} evidence item(s) from {meta.get('filename', 'document')}",
+        f"Retrieved and extracted {len(evidence)} evidence item(s) from {filename}",
         {
             "evidence_count": len(evidence),
             "pages": meta.get("pages", 0),
-            "chunks": meta.get("chunks", 0),
+            "chunks": meta.get("chunks", len(retrieved_chunks) or meta.get("chunks", 0)),
             "truncated": meta.get("truncated", False),
         },
     )

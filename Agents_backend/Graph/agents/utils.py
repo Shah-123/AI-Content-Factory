@@ -30,6 +30,9 @@ _QUALITY_MODEL = os.getenv("LLM_QUALITY_MODEL", "gpt-4o-mini")
 
 llm_fast = ChatOpenAI(model=_FAST_MODEL, temperature=0)
 llm_quality = ChatOpenAI(model=_QUALITY_MODEL, temperature=0.1)
+# Planner LLM uses higher temperature so blog outlines vary across runs
+# instead of converging on the same headings for the same topic.
+llm_planner = ChatOpenAI(model=_QUALITY_MODEL, temperature=0.7)
 
 # Backward compat alias
 llm = llm_fast

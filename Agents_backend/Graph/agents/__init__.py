@@ -9,6 +9,7 @@ from .revision import revision_node
 from .campaign import campaign_generator_node
 from .video import video_generator_node
 from .document_ingest import document_ingest_node
+from .evaluation import geval_evaluation_node, deepeval_evaluation_node
 
 __all__ = [
     "router_node",
@@ -24,4 +25,6 @@ __all__ = [
     "campaign_generator_node",
     "video_generator_node",
     "document_ingest_node",
+    "geval_evaluation_node",
+    "deepeval_evaluation_node",
 ]

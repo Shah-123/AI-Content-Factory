@@ -33,6 +33,8 @@ from Graph.nodes import (
     video_generator_node,
     podcast_node,
     document_ingest_node,
+    geval_evaluation_node,
+    deepeval_evaluation_node,
     _safe_slug
 )
 from Graph.agents.revision import MAX_REVISIONS
@@ -53,7 +55,8 @@ def create_blog_structure(topic: str) -> dict:
     """Creates organized folder structure for the blog."""
     timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_topic = _safe_slug(topic)[:50]
-    base_folder = f"blogs/{safe_topic}_{timestamp}"
+    backend_dir = Path(__file__).resolve().parent
+    base_folder = str((backend_dir / "blogs" / f"{safe_topic}_{timestamp}").resolve()).replace("\\", "/")
 
     folders = {
         "base":     base_folder,
@@ -250,6 +253,58 @@ def save_blog_content(folders: dict, state: State) -> dict:
         saved["blog_evaluator_report"] = path
         print(f"   ✅ Saved blog evaluator report")
 
+    if state.get("geval_scores"):
+        geval = state["geval_scores"]
+        geval_report = f"""G-EVAL (LLM-AS-JUDGE) ACADEMIC REPORT
+============================================================
+Overall G-Eval Score: {geval.get('overall_score', 'N/A')}/5.0
+
+Rubric Evaluations:
+------------------------------------------------------------
+1. COHERENCE: {geval.get('coherence', {}).get('score', 'N/A')}/5
+   Reasoning: {geval.get('coherence', {}).get('reasoning', 'N/A')}
+
+2. RELEVANCE: {geval.get('relevance', {}).get('score', 'N/A')}/5
+   Reasoning: {geval.get('relevance', {}).get('reasoning', 'N/A')}
+
+3. ACCURACY & GROUNDING: {geval.get('accuracy', {}).get('score', 'N/A')}/5
+   Reasoning: {geval.get('accuracy', {}).get('reasoning', 'N/A')}
+
+4. TONE ALIGNMENT: {geval.get('tone_alignment', {}).get('score', 'N/A')}/5
+   Reasoning: {geval.get('tone_alignment', {}).get('reasoning', 'N/A')}
+"""
+        path = f"{folders['reports']}/geval_report.txt"
+        Path(path).write_text(geval_report, encoding="utf-8")
+        saved["geval_report"] = path
+        print(f"   ✅ Saved G-Eval academic report")
+
+    if state.get("deepeval_scores"):
+        de = state["deepeval_scores"]
+        deepeval_report = f"""DEEPEVAL G-EVAL REPORT (Liu et al. 2023)
+============================================================
+Library:        deepeval (official implementation)
+Score Scale:    0.0 (worst) - 1.0 (best)
+Overall Score:  {de.get('overall_score', 'N/A')}/1.0
+
+Rubric Evaluations:
+------------------------------------------------------------
+1. COHERENCE: {de.get('coherence', {}).get('score', 'N/A')}/1.0
+   Reasoning: {de.get('coherence', {}).get('reasoning', 'N/A')}
+
+2. RELEVANCE: {de.get('relevance', {}).get('score', 'N/A')}/1.0
+   Reasoning: {de.get('relevance', {}).get('reasoning', 'N/A')}
+
+3. ACCURACY & GROUNDING: {de.get('accuracy', {}).get('score', 'N/A')}/1.0
+   Reasoning: {de.get('accuracy', {}).get('reasoning', 'N/A')}
+
+4. TONE ALIGNMENT: {de.get('tone_alignment', {}).get('score', 'N/A')}/1.0
+   Reasoning: {de.get('tone_alignment', {}).get('reasoning', 'N/A')}
+"""
+        path = f"{folders['reports']}/deepeval_report.txt"
+        Path(path).write_text(deepeval_report, encoding="utf-8")
+        saved["deepeval_report"] = path
+        print(f"   ✅ Saved deepeval (official G-Eval) report")
+
     if state.get("keyword_report"):
         path = f"{folders['reports']}/keyword_optimization.txt"
         Path(path).write_text(state["keyword_report"], encoding="utf-8")
@@ -261,9 +316,10 @@ def save_blog_content(folders: dict, state: State) -> dict:
         saved["completion_report"] = path
 
     # 4. Audio
-    if state.get("podcast_audio_path") and os.path.exists(state["podcast_audio_path"]):
+    if state.get("podcast_audio_path") and os.path.exists(state["podcast_audio_path"]) and os.path.getsize(state["podcast_audio_path"]) > 0:
         import shutil
-        dest = f"{folders['audio']}/podcast.wav"
+        ext = os.path.splitext(state["podcast_audio_path"])[1] or ".wav"
+        dest = f"{folders['audio']}/podcast{ext}"
         try:
             if not os.path.samefile(state["podcast_audio_path"], dest):
                 shutil.copy(state["podcast_audio_path"], dest)
@@ -272,7 +328,7 @@ def save_blog_content(folders: dict, state: State) -> dict:
         saved["podcast"] = dest
 
     # 5. Video
-    if state.get("video_path") and os.path.exists(state["video_path"]):
+    if state.get("video_path") and os.path.exists(state["video_path"]) and os.path.getsize(state["video_path"]) > 0:
         import shutil
         dest = f"{folders['video']}/short.mp4"
         try:
@@ -306,10 +362,14 @@ def save_blog_content(folders: dict, state: State) -> dict:
         "qa_score":              state.get("qa_score"),
         "qa_verdict":            state.get("qa_verdict"),
         "blog_evaluator_score":  state.get("blog_evaluator_score"),
+        "geval_scores":          state.get("geval_scores"),
+        "deepeval_scores":       state.get("deepeval_scores"),
         "file_paths": {
             "blog":                  saved.get("blog"),
             "qa_report":             saved.get("qa_report"),
             "blog_evaluator_report": saved.get("blog_evaluator_report"),
+            "geval_report":          saved.get("geval_report"),
+            "deepeval_report":       saved.get("deepeval_report"),
             "completion_report":     saved.get("completion_report"),
             "keyword_report":        saved.get("keyword_report"),
             "evidence":              saved.get("evidence"),
@@ -377,6 +437,11 @@ def build_graph(memory=None):
     workflow.add_node("revision",              revision_node)
     workflow.add_node("keyword_optimizer",    keyword_optimizer_node)
     workflow.add_node("blog_evaluator",       blog_evaluator_node)
+    workflow.add_node("geval_evaluator",       geval_evaluation_node)
+    # NOTE: `deepeval_evaluator` is NOT wired into the graph.
+    # The official deepeval G-Eval (Liu et al. 2023) makes 4 extra LLM calls
+    # per blog, so it runs ON DEMAND from the UI ("Run Academic Audit" button)
+    # via the POST /api/jobs/{job_id}/run-deepeval endpoint.
     workflow.add_node("campaign_generator",   campaign_generator_node)
     workflow.add_node("video_generator",      video_generator_node)
     workflow.add_node("podcast_generator",    podcast_node)
@@ -452,6 +517,7 @@ def build_graph(memory=None):
     workflow.add_edge("revision", "qa_agent")  # ← the feedback loop
 
     workflow.add_edge("keyword_optimizer", "blog_evaluator")
+    workflow.add_edge("blog_evaluator", "geval_evaluator")
 
     def after_evaluator_router(s):
         destinations = []
@@ -464,7 +530,7 @@ def build_graph(memory=None):
         return destinations if destinations else END
 
     workflow.add_conditional_edges(
-        "blog_evaluator",
+        "geval_evaluator",
         after_evaluator_router,
         ["campaign_generator", "video_generator", "podcast_generator", END]
     )

@@ -55,6 +55,93 @@ _file_locks: Dict[str, threading.Lock] = {}
 _DATA_DIR = Path(__file__).parent / "data" / "events"
 _DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+# Active manual tasks currently running in the process
+_active_tasks = set()
+
+def register_active_task(job_id: str, task_name: str):
+    """Register a manual task as currently running in memory."""
+    _active_tasks.add((job_id, task_name))
+
+def unregister_active_task(job_id: str, task_name: str):
+    """Unregister a manual task from memory."""
+    _active_tasks.discard((job_id, task_name))
+
+def _heal_stuck_events(job_id: str) -> List[dict]:
+    """
+    Read events from disk, check for stuck/orphaned manual tasks,
+    write a recovery event if needed, and return the list of events.
+    """
+    file_path = _DATA_DIR / f"{job_id}.jsonl"
+    file_lock = _get_file_lock(job_id)
+    events_list = []
+    
+    if not file_path.exists():
+        return events_list
+
+    try:
+        with file_lock:
+            with open(file_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            
+            for line in lines:
+                stripped = line.strip()
+                if stripped:
+                    try:
+                        events_list.append(json.loads(stripped))
+                    except json.JSONDecodeError:
+                        pass
+                        
+            # Analyze event sequence to find orphaned tasks
+            pending_starts = {}
+            for idx, ev in enumerate(events_list):
+                status = ev.get("status")
+                agent = ev.get("agent_name")
+                if status == "started":
+                    pending_starts[agent] = ev
+                elif status in ("completed", "error"):
+                    pending_starts.clear()
+            
+            # If there are pending starts, check if they are still active
+            stuck_agents = []
+            for agent, start_ev in pending_starts.items():
+                task_name = agent
+                if agent == "podcast_generator":
+                    task_name = "podcast"
+                elif agent == "campaign_generator":
+                    task_name = "campaign"
+                elif agent == "qa_agent":
+                    task_name = "qa"
+                
+                # Check if it is a manual task
+                if task_name in {"podcast", "campaign", "video", "qa", "images", "deepeval"}:
+                    # Check if it is currently registered as active in memory
+                    if (job_id, task_name) not in _active_tasks:
+                        stuck_agents.append(agent)
+            
+            if stuck_agents:
+                # We have stuck tasks! Write a system error event to heal them.
+                agents_str = ", ".join(stuck_agents)
+                healing_event = {
+                    "job_id": job_id,
+                    "agent_name": "system",
+                    "status": "error",
+                    "message": f"Task(s) [{agents_str}] aborted (server restarted or crashed).",
+                    "timestamp": time.time(),
+                    "metrics": {}
+                }
+                events_list.append(healing_event)
+                
+                # Persist the healing event to disk
+                with open(file_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(healing_event) + "\n")
+                    
+                logger.info(f"🩹 Healed stuck manual tasks [{agents_str}] for job {job_id}")
+                
+    except Exception as e:
+        logger.error(f"Error healing stuck events for job {job_id}: {e}")
+        
+    return events_list
+
 
 def _get_file_lock(job_id: str) -> threading.Lock:
     """Get or create a threading lock for a job's event file."""
@@ -154,24 +241,13 @@ def subscribe(job_id: str) -> asyncio.Queue:
     """
     queue = asyncio.Queue(maxsize=500)
 
-    # Replay history from disk (with file lock to avoid reading partial writes)
-    file_path = _DATA_DIR / f"{job_id}.jsonl"
-    file_lock = _get_file_lock(job_id)
-    if file_path.exists():
+    # Replay history from disk with healing for stuck events
+    history = _heal_stuck_events(job_id)
+    for event in history:
         try:
-            with file_lock:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-            for line in lines:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    queue.put_nowait(json.loads(stripped))
-                except json.JSONDecodeError as je:
-                    logger.warning(f"Skipping corrupt event line for {job_id}: {je}")
+            queue.put_nowait(event)
         except Exception as e:
-            logger.error(f"Failed to read events from disk for {job_id}: {e}")
+            logger.warning(f"Skipping replay event for {job_id}: {e}")
 
     _subscribers[job_id].append(queue)
     return queue
@@ -203,21 +279,4 @@ def get_history(job_id: str) -> List[dict]:
     """
     Get all stored events for a job from disk.
     """
-    file_path = _DATA_DIR / f"{job_id}.jsonl"
-    file_lock = _get_file_lock(job_id)
-    result = []
-    if file_path.exists():
-        try:
-            with file_lock:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-            for line in lines:
-                stripped = line.strip()
-                if stripped:
-                    try:
-                        result.append(json.loads(stripped))
-                    except json.JSONDecodeError:
-                        pass
-        except Exception as e:
-            logger.error(f"Failed to get history for {job_id}: {e}")
-    return result
+    return _heal_stuck_events(job_id)
