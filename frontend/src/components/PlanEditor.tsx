@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   Bot, Trash2, GripVertical, Pencil, PlusSquare
 } from 'lucide-react';
@@ -37,6 +37,19 @@ export function PlanEditor({ plan, onApprove, onRevise, onUpdatePlan }: PlanEdit
   const [feedback, setFeedback]               = useState('');
   const [isEdited, setIsEdited]               = useState(false);
   const [expandedSection, setExpandedSection] = useState<number | null>(null);
+  const [pendingFocusIdx, setPendingFocusIdx] = useState<number | null>(null);
+  const titleRefs = useRef<Record<number, HTMLInputElement | null>>({});
+
+  // Focus + scroll the newly added section's title input after it mounts.
+  useEffect(() => {
+    if (pendingFocusIdx === null) return;
+    const el = titleRefs.current[pendingFocusIdx];
+    if (el) {
+      el.focus();
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    setPendingFocusIdx(null);
+  }, [pendingFocusIdx, tasks.length]);
 
   const markEdited = () => setIsEdited(true);
 
@@ -52,16 +65,19 @@ export function PlanEditor({ plan, onApprove, onRevise, onUpdatePlan }: PlanEdit
   };
 
   const addTask = () => {
-    const newId = tasks.length;
-    setTasks(prev => [...prev, {
-      id: newId,
-      title:        '',
-      goal:         '',
-      bullets:      [],
-      target_words: 350,
-      tags:         [],
-    }]);
-    setExpandedSection(newId);
+    setTasks(prev => {
+      const newIdx = prev.length;
+      setExpandedSection(newIdx);
+      setPendingFocusIdx(newIdx);
+      return [...prev, {
+        id: newIdx,
+        title:        '',
+        goal:         '',
+        bullets:      [],
+        target_words: 350,
+        tags:         [],
+      }];
+    });
     markEdited();
   };
 
@@ -113,6 +129,7 @@ export function PlanEditor({ plan, onApprove, onRevise, onUpdatePlan }: PlanEdit
                 <GripVertical className="w-3.5 h-3.5 text-base-600 shrink-0" />
                 <span className="text-accent-500 text-xs font-bold shrink-0 w-5">{idx + 1}</span>
                 <input
+                  ref={el => { titleRefs.current[idx] = el; }}
                   type="text"
                   className="flex-1 bg-transparent border-none text-sm text-base-100 font-medium focus:outline-none placeholder:text-base-500"
                   placeholder="Section title..."
@@ -167,7 +184,19 @@ export function PlanEditor({ plan, onApprove, onRevise, onUpdatePlan }: PlanEdit
                         value={task.target_words}
                         min={100}
                         max={1000}
-                        onChange={e => updateTask(idx, 'target_words', Math.max(100, parseInt(e.target.value) || 350))}
+                        onChange={e => {
+                          // Allow free typing — store raw numeric value (or 0 while empty)
+                          // so the user can clear the field and type a new number.
+                          const raw = e.target.value;
+                          const parsed = raw === '' ? 0 : parseInt(raw, 10);
+                          updateTask(idx, 'target_words', isNaN(parsed) ? 0 : parsed);
+                        }}
+                        onBlur={e => {
+                          // Clamp only when the user leaves the field.
+                          const parsed = parseInt(e.target.value, 10);
+                          const safe = isNaN(parsed) ? 350 : Math.min(1000, Math.max(100, parsed));
+                          updateTask(idx, 'target_words', safe);
+                        }}
                       />
                     </div>
                     <div className="flex-1">

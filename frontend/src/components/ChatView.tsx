@@ -1,12 +1,16 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { motion } from 'motion/react';
 import {
   ListOrdered, PlusCircle, Send, Network,
-  CheckCircle2, RefreshCw, TrendingUp, ShieldAlert, X
+  CheckCircle2, RefreshCw, ShieldAlert, X, Hash,
+  FileText, Film, Podcast
 } from 'lucide-react';
 import { APIClient, Job, AgentEvent, CreateJobParams, UploadResult, SourceMode } from '../api';
 import { ViewState } from '../types';
 import { PlanEditor } from './PlanEditor';
 import { UploadChip } from './UploadChip';
+import { ProgressTracker } from './ProgressTracker';
+
 
 const ACCEPTED_UPLOAD_TYPES = '.pdf,.docx,.txt,.md';
 
@@ -22,6 +26,28 @@ interface ChatViewProps {
   handleUpdatePlan:   (jobId: string, plan: any) => void;
 }
 
+/* ---------- Hero Feature Cards ---------- */
+const HERO_FEATURES = [
+  {
+    icon: FileText,
+    title: 'Research & Write',
+    desc: 'Multi-agent pipeline with web research, evidence grounding, and QA audit.',
+    gradient: 'from-amber-500/20 to-orange-600/10',
+  },
+  {
+    icon: Film,
+    title: 'Video Generation',
+    desc: 'Automated storyboard, AI voiceover, and Pexels B-roll compilation.',
+    gradient: 'from-blue-500/20 to-indigo-600/10',
+  },
+  {
+    icon: Podcast,
+    title: 'Podcast Studio',
+    desc: 'Gemini-powered conversational audio with custom voice synthesis.',
+    gradient: 'from-emerald-500/20 to-teal-600/10',
+  },
+] as const;
+
 export function ChatView({
   currentJob, events, topicError, clearTopicError,
   handleCreateJob, handleApprovePlan, handleRevisePlan, handleUpdatePlan,
@@ -29,7 +55,7 @@ export function ChatView({
   const [topicInput, setTopicInput] = useState('');
   const [tone, setTone]             = useState('professional');
   const [sections, setSections]     = useState(3);
-  const [trending, setTrending]     = useState<string[]>([]);
+  const [keywordsInput, setKeywordsInput] = useState('');
 
   // Document upload state
   const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
@@ -39,10 +65,8 @@ export function ChatView({
   const [sourceMode, setSourceMode] = useState<SourceMode>('hybrid');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Fetch trending topics once when the dashboard mounts so the empty state has quick-picks.
-  useEffect(() => {
-    APIClient.fetchTrending().then(setTrending).catch(() => setTrending([]));
-  }, []);
+
+
 
   const clearUpload = () => {
     setUploadStatus('idle');
@@ -80,17 +104,26 @@ export function ChatView({
     }
     if (!topic) return;
     const upload_id = uploadStatus === 'ready' ? uploadResult?.upload_id : undefined;
+    const keywords = keywordsInput
+      .split(',')
+      .map(k => k.trim())
+      .filter(k => k.length > 0);
     handleCreateJob({
-      topic, tone, sections,
+      topic, tone, sections, keywords,
       generate_podcast: false, generate_video: false, generate_campaign: false,
       upload_id,
       source_mode: upload_id ? sourceMode : undefined,
     });
     setTopicInput('');
+    setKeywordsInput('');
     clearUpload();
   };
 
+
+
+
   const isAwaitingApproval = currentJob?.status === 'awaiting_approval';
+  const showHero = !currentJob && events.length === 0;
 
   return (
     <main className="flex-1 flex flex-col p-6 md:p-8 relative overflow-hidden">
@@ -111,7 +144,61 @@ export function ChatView({
         </p>
       </header>
 
-      <div className="flex-1 overflow-y-auto pr-2 md:pr-4 flex flex-col gap-5 pb-40 scroll-smooth stagger">
+      <div className="flex-1 overflow-y-auto pr-2 md:pr-4 flex flex-col gap-5 pb-4 scroll-smooth">
+        {/* -------- Welcome Hero (shown when no job is active) -------- */}
+        {showHero && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.6 }}
+            className="flex flex-col items-center justify-center py-8 md:py-16 relative"
+          >
+            {/* Ambient glow behind heading */}
+            <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[400px] h-[200px] bg-accent-500/8 rounded-full blur-[80px] pointer-events-none" />
+
+            <motion.h3
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.15, duration: 0.5 }}
+              className="text-4xl md:text-5xl font-extrabold tracking-tight text-center mb-3 text-shimmer relative z-10"
+            >
+              Create Something Amazing
+            </motion.h3>
+            <motion.p
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.3, duration: 0.4 }}
+              className="text-base-400 text-center max-w-lg mb-10 text-sm leading-relaxed relative z-10"
+            >
+              Enter a topic below and our multi-agent pipeline will research, write, and polish a publication-ready blog — with optional video, podcast, and social campaigns.
+            </motion.p>
+
+            {/* Feature cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 w-full max-w-3xl relative z-10">
+              {HERO_FEATURES.map((feat, i) => (
+                <motion.div
+                  key={feat.title}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.4 + i * 0.1, duration: 0.4 }}
+                  className={`glass-panel rounded-2xl p-5 border border-white/6 hover-lift cursor-default bg-gradient-to-br ${feat.gradient}`}
+                >
+                  <div className="w-10 h-10 rounded-xl bg-white/5 border border-white/8 flex items-center justify-center mb-3">
+                    <feat.icon className="w-5 h-5 text-accent-400" />
+                  </div>
+                  <h4 className="font-bold text-base-100 text-sm mb-1">{feat.title}</h4>
+                  <p className="text-[12px] text-base-400 leading-relaxed">{feat.desc}</p>
+                </motion.div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+
+        {/* -------- Progress Tracker (when a job is running) -------- */}
+        {currentJob && currentJob.status !== 'completed' && currentJob.status !== 'failed' && events.length > 0 && (
+          <ProgressTracker events={events} jobStatus={currentJob.status} />
+        )}
+
         {currentJob && (
           <div className="self-end max-w-2xl w-full">
             <div className="aurora-bubble p-5 rounded-2xl rounded-tr-sm">
@@ -123,7 +210,13 @@ export function ChatView({
         )}
 
         {events.map((event, i) => (
-          <div key={i} className="self-start max-w-3xl flex gap-3 w-full">
+          <motion.div
+            key={i}
+            className="self-start max-w-3xl flex gap-3 w-full"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3, delay: Math.min(i * 0.03, 0.3) }}
+          >
             <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${event.status === 'error' ? 'bg-signal-error-dim' : 'bg-base-800 border border-white/6'}`}>
               <Network className={`w-4 h-4 ${event.status === 'error' ? 'text-signal-error' : 'text-accent-400'}`} />
             </div>
@@ -144,7 +237,7 @@ export function ChatView({
                 {event.message}
               </p>
             </div>
-          </div>
+          </motion.div>
         ))}
 
         {events.length === 0 && currentJob?.status === 'completed' && (
@@ -165,6 +258,11 @@ export function ChatView({
           </div>
         )}
 
+        {/* Completed job also gets a progress tracker showing all-done */}
+        {currentJob?.status === 'completed' && (
+          <ProgressTracker events={events} jobStatus={currentJob.status} />
+        )}
+
         {isAwaitingApproval && currentJob?.plan && (
           <PlanEditor
             plan={currentJob.plan}
@@ -174,10 +272,12 @@ export function ChatView({
             onUpdatePlan={(plan) => handleUpdatePlan(currentJob.id, plan)}
           />
         )}
+
+
       </div>
 
       {(!currentJob || currentJob.status === 'completed' || currentJob.status === 'failed') && (
-        <div className="absolute bottom-6 left-6 md:left-8 right-6 md:right-8 z-30">
+        <div className="w-full max-w-4xl mx-auto mt-4 shrink-0 z-30">
           {topicError && (
             <div className="max-w-4xl mx-auto mb-3 fade-in">
               <div className="flex items-start gap-3 p-3.5 pr-2 rounded-xl border border-signal-error/30 bg-signal-error-dim text-signal-error">
@@ -207,37 +307,42 @@ export function ChatView({
               </div>
             </div>
           )}
-          {/* Trending quick-picks: visible only on the truly-empty dashboard */}
-          {!currentJob && events.length === 0 && trending.length > 0 && (
-            <div className="max-w-4xl mx-auto mb-3 flex flex-wrap items-center gap-2 fade-in">
-              <span className="flex items-center gap-1.5 text-[11px] font-semibold text-base-500 uppercase tracking-[0.12em] mr-1">
-                <TrendingUp className="w-3.5 h-3.5 text-accent-300" />
-                Trending
-              </span>
-              {trending.map((topic, i) => (
-                <button
-                  key={i}
-                  onClick={() => submitJob(topic)}
-                  className="px-3.5 py-1.5 rounded-full text-xs glass-pill text-base-200 hover:text-base-50 hover:border-accent-500/30 transition-all whitespace-nowrap"
-                  title={`Generate a blog on: ${topic}`}
-                >
-                  {topic}
-                </button>
-              ))}
-            </div>
-          )}
+
+
           <div className="glass-panel rounded-2xl p-4 flex flex-col gap-3 max-w-4xl mx-auto bg-base-900/90">
             <div className="flex gap-2 px-1 overflow-x-auto pb-1">
               {['professional', 'conversational', 'technical', 'educational'].map(t => (
                 <button key={t} onClick={() => setTone(t)}
                   className={`px-3.5 py-1.5 rounded-lg text-xs whitespace-nowrap capitalize font-medium transition-all ${tone === t ? 'text-accent-400 bg-accent-500/10 border border-accent-500/20' : 'text-base-400 hover:text-base-200 border border-transparent hover:bg-white/3'}`}>{t}</button>
               ))}
-              <div className="ml-auto items-center gap-2 text-xs text-base-400 bg-base-800 px-3 py-1.5 rounded-lg whitespace-nowrap hidden sm:flex border border-white/4">
-                <ListOrdered className="w-3.5 h-3.5" />
-                <select className="bg-transparent border-none outline-none focus:ring-0 text-base-200 cursor-pointer text-xs" value={sections} onChange={e => setSections(Number(e.target.value))}>
-                  {[2,3,4,5,6].map(n => <option key={n} value={n}>{n} sections</option>)}
+              <div className="ml-auto items-center gap-2 text-xs text-base-400 bg-gradient-to-br from-base-800 to-base-900 px-3 py-1.5 rounded-lg whitespace-nowrap hidden sm:flex border border-white/6 shadow-sm hover:border-accent-500/30 transition-all duration-200">
+                <ListOrdered className="w-3.5 h-3.5 text-accent-400" />
+                <select className="bg-transparent border-none outline-none focus:ring-0 text-base-200 cursor-pointer text-xs font-medium hover:text-accent-300 transition-colors" value={sections} onChange={e => setSections(Number(e.target.value))}>
+                  {[2,3,4,5,6].map(n => <option key={n} value={n} className="bg-base-900 text-base-200">{n} sections</option>)}
                 </select>
               </div>
+            </div>
+
+            {/* SEO keywords input (comma-separated). Empty = skip keyword optimization. */}
+            <div className="flex items-center gap-2 bg-base-800/70 rounded-lg px-3 py-1.5 border border-white/6 focus-within:border-accent-500/30 transition-colors">
+              <Hash className="w-3.5 h-3.5 text-accent-400 shrink-0" />
+              <input
+                type="text"
+                className="flex-1 bg-transparent border-none text-base-200 placeholder-base-500 text-xs focus:outline-none focus:ring-0"
+                placeholder="SEO keywords (comma-separated, optional) — e.g. AI healthcare, medical automation"
+                value={keywordsInput}
+                onChange={e => setKeywordsInput(e.target.value)}
+              />
+              {keywordsInput && (
+                <button
+                  type="button"
+                  onClick={() => setKeywordsInput('')}
+                  className="p-0.5 text-base-500 hover:text-base-200"
+                  aria-label="Clear keywords"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
             </div>
 
             {uploadStatus !== 'idle' && (
@@ -287,7 +392,7 @@ export function ChatView({
                 onChange={e => setTopicInput(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitJob(); } }}
               />
-              <button
+              <motion.button
                 onClick={() => submitJob()}
                 disabled={
                   uploadStatus === 'uploading'
@@ -301,9 +406,11 @@ export function ChatView({
                     ? 'opacity-40 cursor-not-allowed shadow-none! transform-none!'
                     : ''
                 }`}
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
               >
                 <Send className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
-              </button>
+              </motion.button>
             </div>
           </div>
         </div>

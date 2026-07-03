@@ -1,7 +1,9 @@
-import { Bell, Settings, Menu, Search } from 'lucide-react';
+import { Bell, Settings, Menu, Search, Sun, Moon } from 'lucide-react';
 import { ViewState } from '../types';
+import { useTheme } from '../hooks/useTheme';
 
 export function TopNav({ view }: { view: ViewState }) {
+  const { theme, toggleTheme } = useTheme();
   return (
     <nav className="sticky top-0 w-full z-40 bg-base-950/60 backdrop-blur-xl flex justify-between items-center px-6 md:px-8 py-3 border-b border-white/4 h-14 shrink-0">
       <div className="flex items-center gap-4">
@@ -24,6 +26,16 @@ export function TopNav({ view }: { view: ViewState }) {
             />
           </div>
         )}
+        <button
+          onClick={toggleTheme}
+          className="p-2 rounded-xl text-base-400 hover:text-accent-400 hover:bg-white/3 transition-all"
+          title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          aria-label="Toggle theme"
+        >
+          {theme === 'dark'
+            ? <Sun  className="w-[18px] h-[18px]" />
+            : <Moon className="w-[18px] h-[18px]" />}
+        </button>
         <button className="p-2 rounded-xl text-base-400 hover:text-accent-400 hover:bg-white/3 transition-all"><Bell     className="w-[18px] h-[18px]" /></button>
         <button className="p-2 rounded-xl text-base-400 hover:text-accent-400 hover:bg-white/3 transition-all hidden md:flex"><Settings className="w-[18px] h-[18px]" /></button>
         <button className="md:hidden p-2 rounded-xl text-base-400"><Menu className="w-[18px] h-[18px]" /></button>

@@ -62,7 +62,12 @@ export function MediaView({ navTo, currentJob }: { navTo: (v: ViewState) => void
             {currentJob?.podcast_file ? (
               <div className="bg-base-900 border border-white/[0.04] rounded-xl p-4 md:p-6 relative z-10">
                 <h4 className="text-sm font-medium text-accent-400 mb-4">{currentJob.topic} — Podcast</h4>
-                <audio controls className="w-full"><source src={APIClient.getFileUrl(currentJob.id, currentJob.podcast_file)} type="audio/mpeg" /></audio>
+                <audio controls className="w-full">
+                  <source 
+                    src={APIClient.getFileUrl(currentJob.id, currentJob.podcast_file)} 
+                    type={currentJob.podcast_file.endsWith('.wav') ? 'audio/wav' : 'audio/mpeg'} 
+                  />
+                </audio>
               </div>
             ) : (
               <div className="bg-base-900 border border-dashed border-white/[0.06] rounded-xl p-8 flex items-center justify-center relative z-10">
@@ -70,11 +75,17 @@ export function MediaView({ navTo, currentJob }: { navTo: (v: ViewState) => void
               </div>
             )}
             <div className="mt-6 flex flex-col md:flex-row justify-between items-start md:items-end gap-4 relative z-10">
-              <div className="text-xs text-base-500 flex items-center gap-2"><UserRoundCog className="w-4 h-4" /> Voice: alloy · OpenAI TTS</div>
+              <div className="text-xs text-base-500 flex items-center gap-2">
+                <UserRoundCog className="w-4 h-4" /> 
+                {currentJob?.podcast_file?.endsWith('.wav') 
+                  ? 'Voice: Puck & Aoede (2-Speaker) · Gemini Audio' 
+                  : 'Voice: alloy · OpenAI TTS'}
+              </div>
               {currentJob?.podcast_file && (
                 <a href={APIClient.getFileUrl(currentJob.id, currentJob.podcast_file)} download target="_blank" rel="noreferrer"
                   className="btn-primary px-5 py-2 rounded-xl text-sm font-semibold flex items-center gap-2">
-                  <Download className="w-4 h-4" /> Download MP3
+                  <Download className="w-4 h-4" /> 
+                  {currentJob.podcast_file.endsWith('.wav') ? 'Download WAV' : 'Download MP3'}
                 </a>
               )}
             </div>
@@ -143,13 +154,13 @@ export function MediaView({ navTo, currentJob }: { navTo: (v: ViewState) => void
           <div className="glass-pill p-5 rounded-xl border-l-2 border-l-base-400 hover:bg-white/[0.03] transition-colors">
             <div className="flex items-center gap-2 text-sm font-semibold text-base-100 mb-3">
               <svg className="w-4 h-4 fill-current text-base-200" viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.008 4.09H5.078z"></path></svg>
-              X Thread
+              X Post / Tweet
             </div>
-            <p className="text-xs text-base-400 leading-relaxed mb-4 whitespace-pre-wrap">{currentJob?.social_twitter || "Twitter thread will be generated..."}</p>
+            <p className="text-xs text-base-400 leading-relaxed mb-4 whitespace-pre-wrap">{currentJob?.social_twitter || "X post will be generated..."}</p>
             {currentJob?.social_twitter && (
               <button onClick={() => navigator.clipboard.writeText(currentJob.social_twitter!)}
                 className="w-full py-2 bg-white/[0.03] hover:bg-white/[0.06] rounded-xl text-xs font-medium text-base-200 flex items-center justify-center gap-2 border border-white/[0.06] transition-colors group">
-                <Copy className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" /> Copy Thread
+                <Copy className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" /> Copy Post
               </button>
             )}
           </div>

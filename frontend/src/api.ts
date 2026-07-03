@@ -3,10 +3,14 @@ const WS_BASE_URL = 'ws://localhost:8000';
 
 export type SourceMode = 'closed_book' | 'hybrid' | 'auto_topic';
 
+
 export interface CreateJobParams {
   topic: string;
   tone?: string;
   sections?: number;
+  // SEO keywords the writer should weave into the post. The form accepts
+  // a comma-separated string; we split client-side before sending.
+  keywords?: string[];
   generate_podcast?: boolean;
   generate_video?: boolean;
   generate_campaign?: boolean;
@@ -41,6 +45,21 @@ export interface Job {
   qa_score?: number;
   qa_verdict?: string;
   blog_evaluator_score?: number;
+  geval_scores?: {
+    coherence: { score: number; reasoning: string };
+    relevance: { score: number; reasoning: string };
+    accuracy: { score: number; reasoning: string };
+    tone_alignment: { score: number; reasoning: string };
+    overall_score: number;
+  };
+  // Official deepeval G-Eval (Liu et al. 2023). Scores on 0.0–1.0 scale.
+  deepeval_scores?: {
+    coherence: { score: number | null; reasoning: string };
+    relevance: { score: number | null; reasoning: string };
+    accuracy: { score: number | null; reasoning: string };
+    tone_alignment: { score: number | null; reasoning: string };
+    overall_score: number;
+  };
   blog_file?: string;
   blog_html_file?: string;
   podcast_file?: string;
@@ -68,17 +87,6 @@ export class APIClient {
     const res = await fetch(`${API_BASE_URL}/api/jobs`);
     if (!res.ok) throw new Error('Failed to fetch jobs');
     return res.json();
-  }
-
-  static async fetchTrending(): Promise<string[]> {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/trending`);
-      if (!res.ok) return [];
-      const data = await res.json();
-      return Array.isArray(data.topics) ? data.topics : [];
-    } catch {
-      return [];
-    }
   }
 
   static async uploadDocument(file: File): Promise<UploadResult> {
@@ -126,6 +134,13 @@ export class APIClient {
     const res = await fetch(`${API_BASE_URL}/api/jobs/${id}`);
     if (!res.ok) throw new Error('Failed to get job');
     return res.json();
+  }
+
+  static async deleteJob(id: string): Promise<void> {
+    const res = await fetch(`${API_BASE_URL}/api/jobs/${id}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) throw new Error('Failed to delete job');
   }
 
   static async approvePlan(id: string): Promise<void> {
@@ -179,6 +194,11 @@ export class APIClient {
   static async triggerQA(id: string): Promise<void> {
     const res = await fetch(`${API_BASE_URL}/api/jobs/${id}/run-qa`, { method: 'POST' });
     if (!res.ok) throw new Error('Failed to trigger QA');
+  }
+
+  static async runDeepEval(id: string): Promise<void> {
+    const res = await fetch(`${API_BASE_URL}/api/jobs/${id}/run-deepeval`, { method: 'POST' });
+    if (!res.ok) throw new Error('Failed to trigger deepeval academic audit');
   }
 
   static getFileUrl(jobId: string, filename: string): string {

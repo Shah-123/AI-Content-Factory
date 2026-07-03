@@ -20,6 +20,17 @@ export default function App() {
     try {
       const fetched = await APIClient.fetchJobs();
       setJobs(fetched);
+      // If the currently-open job changed status server-side (e.g. transitioned
+      // to awaiting_approval while WS was disconnected), re-pull the full record
+      // so currentJob.plan becomes available for the HITL PlanEditor.
+      setCurrentJob(prev => {
+        if (!prev) return prev;
+        const fresh = fetched.find(j => j.id === prev.id);
+        if (fresh && (fresh.status !== prev.status || (!prev.plan && fresh.status === 'awaiting_approval'))) {
+          APIClient.getJob(prev.id).then(setCurrentJob).catch(console.error);
+        }
+        return prev;
+      });
     } catch (e) {
       console.error('Failed to fetch jobs:', e);
     }
@@ -44,7 +55,9 @@ export default function App() {
       ws.disconnect();
       ws.connect(jobId, (event) => {
         setEvents(prev => [...prev, event]);
-        if (event.status === 'completed' || event.status === 'error') {
+        // Refresh currentJob whenever the backend signals a state transition.
+        // 'plan_ready' is critical so the HITL PlanEditor renders the outline.
+        if (['completed', 'error', 'plan_ready', 'plan_revised', 'plan_approved'].includes(event.status)) {
           APIClient.getJob(jobId).then(setCurrentJob).catch(console.error);
         }
       });
@@ -137,6 +150,22 @@ export default function App() {
     navTo('chat');
   };
 
+  const handleDeleteJob = async (jobId: string) => {
+    if (!window.confirm("Are you sure you want to delete this job and all of its generated assets?")) {
+      return;
+    }
+    try {
+      await APIClient.deleteJob(jobId);
+      await fetchJobsList();
+      if (currentJob?.id === jobId) {
+        startNewJob();
+      }
+    } catch (e) {
+      console.error('Failed to delete job:', e);
+      alert('Failed to delete job.');
+    }
+  };
+
   return (
     <div className="min-h-dvh flex overflow-hidden antialiased relative noise-bg ambient-bg">
       <Sidebar
@@ -146,6 +175,7 @@ export default function App() {
         currentJob={currentJob}
         loadJob={loadJob}
         startNewJob={startNewJob}
+        onDeleteJob={handleDeleteJob}
       />
       <div className="flex-1 md:ml-[260px] flex flex-col h-dvh relative">
         <TopNav view={view} />
@@ -169,6 +199,7 @@ export default function App() {
             refreshJob={() => currentJob && refreshCurrentJob(currentJob.id)}
             events={events}
             reconnectWS={reconnectWS}
+            onDeleteJob={handleDeleteJob}
           />
         )}
       </div>
