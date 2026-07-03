@@ -30,3 +30,17 @@ Agents_backend/data/
 
 # Golden test artifacts
 Agents_backend/tests/golden/_runs/
+
+# Caches & Test Results
+.deepeval/
+.pytest_cache/
+Agents_backend/.deepeval/
+Agents_backend/.pytest_cache/
+**/__pycache__/
+
+# User Uploads
+Agents_backend/uploads/
+
+# Node.js
+node_modules/
+
