@@ -160,6 +160,34 @@ def test_extract_evidence_truncates_long_documents(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# sentence splitting and semantic chunking tests
+# ---------------------------------------------------------------------------
+
+def test_split_into_sentences():
+    text = "Hello world. This is sentence two! And sentence three? Yes."
+    sentences = di.split_into_sentences(text)
+    assert sentences == [
+        "Hello world.",
+        "This is sentence two!",
+        "And sentence three?",
+        "Yes."
+    ]
+
+
+def test_semantic_chunking_basic():
+    class FakeEmbeddings:
+        def embed_documents(self, texts):
+            # Return same dummy embedding vectors for all sentences
+            return [[0.1, 0.2]] * len(texts)
+
+    pages = ["Sentence one. Sentence two.", "Sentence three."]
+    chunks = di.semantic_chunking(pages, FakeEmbeddings(), target_chunk_size=10, min_chunk_size=1)
+    
+    assert len(chunks) > 0
+    assert chunks[0].text == "Sentence one."
+
+
+# ---------------------------------------------------------------------------
 # document_ingest_node
 # ---------------------------------------------------------------------------
 
@@ -195,3 +223,67 @@ def test_document_ingest_node_loads_persisted_evidence(tmp_path: Path, monkeypat
     assert out["evidence"][0].source == "doc.pdf"
     # auto_topic + empty topic → derived topic promoted into state
     assert out.get("topic") == "My Topic"
+
+
+def test_document_ingest_node_rag_retrieval(tmp_path: Path, monkeypatch):
+    upload_id = "rag_test"
+    upload_dir = tmp_path / "uploads" / upload_id
+    upload_dir.mkdir(parents=True)
+
+    # Persist fake embeddings.json + meta.json + evidence.json fallback
+    # Embeddings: chunk 0 is "AI safety policy", chunk 1 is "baking cookies"
+    (upload_dir / "embeddings.json").write_text(
+        '['
+        '  {"text": "AI safety policy details", "page_start": 1, "page_end": 1, "embedding": [1.0, 0.0]},'
+        '  {"text": "baking cookies recipe and details", "page_start": 2, "page_end": 2, "embedding": [0.0, 1.0]}'
+        ']',
+        encoding="utf-8",
+    )
+    (upload_dir / "meta.json").write_text(
+        '{"filename":"doc.pdf","pages":2,"chunks":2,"derived_topic":"My Topic"}',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(di, "_resolve_uploads_root", lambda: tmp_path / "uploads")
+
+    # Mock embeddings model and LLM evidence extraction
+    class FakeEmbeddingsModel:
+        def embed_query(self, query):
+            # Query is "AI safety" -> returns embedding [1.0, 0.0]
+            if "AI" in query:
+                return [1.0, 0.0]
+            return [0.0, 1.0]
+
+    monkeypatch.setattr(di, "get_embeddings_model", lambda: FakeEmbeddingsModel())
+
+    # Mock extract_evidence_from_chunks
+    def mock_extract(chunks, filename, topic_hint, max_chunks):
+        # Verify that only the relevant chunk was retrieved
+        assert len(chunks) == 1
+        assert chunks[0].text == "AI safety policy details"
+        return [
+            EvidenceItem(
+                title="AI Fact",
+                url="file://doc.pdf#p1",
+                snippet=chunks[0].text,
+                published_at=None,
+                source=filename,
+                authors=None,
+            )
+        ], False
+
+    monkeypatch.setattr(di, "extract_evidence_from_chunks", mock_extract)
+
+    state = {
+        "_job_id": "",
+        "upload_id": upload_id,
+        "source_mode": "hybrid",
+        "topic": "AI safety and risk planning",
+        "target_keywords": ["AI"],
+    }
+
+    out = di.document_ingest_node(state)
+
+    assert out["document_filename"] == "doc.pdf"
+    assert len(out["evidence"]) == 1
+    assert out["evidence"][0].snippet == "AI safety policy details"
